@@ -1,0 +1,19 @@
+{
+    "columns": [
+        "sku (Артикул)",
+        "name (Название)",
+        "unit (Ед. изм.)",
+        "price (Цена .)",
+        "weight (Вес .)",
+        "supplers (Поставщик)",
+        "image (Картинка)",
+        "product_url (Ссылка)",
+        "category1 (Категория 1)",
+        "category2 (Категория 2)",
+        "category3 (Категория 3)",
+        "--- Отключено ---"
+    ],
+    "selected_categories": [
+        98664124
+    ]
+}
