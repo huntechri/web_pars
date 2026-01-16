@@ -1,0 +1,53 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.venv/
+venv/
+ENV/
+env/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Результаты парсинга
+*.csv
+!categories_config.txt
+
+# Временные файлы
+*.log
+*.tmp
+*.bak
+*.cache
+
+# Windows
+Thumbs.db
+desktop.ini
+$RECYCLE.BIN/
+
+# MacOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Тестовые файлы
+test_*.py
+*_test.py
+check_ip.py
+
+# Временные папки
+PARSER_READY/
+output/
+temp/
+
+# Конфигурация VPN (содержит приватные данные)
+happ_config*.json
+
+# Личные cookies (НЕ коммитить!)
+Cook 
