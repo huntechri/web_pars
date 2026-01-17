@@ -272,9 +272,19 @@ class CurlParser:
         if not items: return
         
         full_header_map = {
-            'level1': 'category1', 'level2': 'category2', 'level3': 'category3', 'level4': 'category4',
-            'article': 'sku', 'name': 'name', 'price': 'price', 'unit': 'unit',
-            'brand': 'supplers', 'weight': 'weight', 'supplier': 'supplier', 'image': 'image', 'url': 'product_url'
+            'article': 'Артикул',
+            'name': 'Наименование',
+            'unit': 'Единица измерения',
+            'price': 'Цена',
+            'brand': 'Поставщик',
+            'weight': 'Вес (кг)',
+            'level1': 'Категория LV1',
+            'level2': 'Категория LV2',
+            'level3': 'Категория LV3',
+            'level4': 'Категория LV4',
+            'image': 'URL изображения',
+            'url': 'Ссылка на товар', # Оставляем возможность вывести ссылку, если пользователь захочет
+            'supplier': 'Источник'    # Петрович
         }
         
         fieldnames = []
@@ -294,7 +304,15 @@ class CurlParser:
         self.log(f"ГОТОВО: Сохранено в {filename}")
 
     def run(self, selected_categories=None, max_products_per_cat=None, selected_columns=None, use_deep_parsing=True, parallel=True):
-        cats_to_parse = selected_categories if selected_categories else [c['code'] for c in self.categories]
+        # selected_categories может быть списком ID или списком объектов {'id': ..., 'path': [...]}
+        input_cats = selected_categories if selected_categories else [c['code'] for c in self.categories]
+        
+        cats_to_parse = []
+        for item in input_cats:
+            if isinstance(item, dict):
+                cats_to_parse.append(item)
+            else:
+                cats_to_parse.append({'id': item, 'path': None})
         
         self.log(f"\n{'='*70}")
         self.log(f"ZAPUSK TURBO-PARSINGA PETROVICH")
@@ -305,22 +323,30 @@ class CurlParser:
         
         all_results = []
         
-        def process_one_cat(cat_id):
+        def process_one_cat(cat_info):
+            cat_id = cat_info.get('id')
+            cat_path = cat_info.get('path')
+            
             try:
-                struct = self.get_category_structure(cat_id)
-                if not struct: return []
-                name = struct.get('title', 'Unknown')
-                self.log(f"\n[#] CATEGORY: {name} (ID: {cat_id})")
+                # Если путь не передан, пытаемся узнать название категории
+                if not cat_path:
+                    struct = self.get_category_structure(cat_id)
+                    if not struct: return []
+                    name = struct.get('title', 'Unknown')
+                    cat_path = [name]
                 
-                if struct.get('product_qty', 0) > 0:
-                    return self.parse_category_products(cat_id, [name], max_products_per_cat)
+                display_name = " -> ".join(cat_path) if cat_path else str(cat_id)
+                self.log(f"\n[#] CATEGORY: {display_name} (ID: {cat_id})")
+                
+                # Запускаем парсинг товаров
+                return self.parse_category_products(cat_id, cat_path, max_products_per_cat)
             except Exception as e:
                 self.log(f"Error cat {cat_id}: {e}")
             return []
 
         # Глобальный параллелизм по категориям
         with ThreadPoolExecutor(max_workers=5) as executor:
-            futures = [executor.submit(process_one_cat, cid) for cid in cats_to_parse]
+            futures = [executor.submit(process_one_cat, cinfo) for cinfo in cats_to_parse]
             completed = 0
             for future in as_completed(futures):
                 if self.stop_requested:

@@ -21,12 +21,13 @@ def resource_path(relative_path):
 
 class CategoryTreeNode:
     """Узел дерева категорий с чекбоксом (БЕЗ API-запросов)"""
-    def __init__(self, parent_frame, category_data, level=0, on_change_callback=None, parent_node=None, saved_selected=None):
+    def __init__(self, parent_frame, category_data, level=0, on_change_callback=None, parent_node=None, saved_selected=None, root_name=None):
         self.category_data = category_data
         self.level = level
         self.on_change_callback = on_change_callback
         self.parent_node = parent_node  # Ссылка на родительский узел GUI
         self.saved_selected = saved_selected or set()
+        self.root_name = root_name # Название группы L1 (например, "Стройматериалы")
         self.children_nodes = []
         self.is_expanded = False
         
@@ -68,7 +69,8 @@ class CategoryTreeNode:
         self.checkbox.pack(side="left", fill="x", expand=True)
         
         # Восстановление состояния при создании
-        if self.category_data.get('code') in self.saved_selected:
+        # Состояние берется либо из сохранений, либо от родителя (если он выбран)
+        if self.category_data.get('code') in self.saved_selected or (self.parent_node and self.parent_node.is_selected()):
             self.checkbox.select()
             
         # АВТО-РАСКРЫТИЕ: если внутри этого узла или в его детях есть выбранные элементы
@@ -106,35 +108,34 @@ class CategoryTreeNode:
                 level=self.level + 1,
                 on_change_callback=self.on_change_callback,
                 parent_node=self,  # Передаем себя как родителя
-                saved_selected=self.saved_selected
+                saved_selected=self.saved_selected,
+                root_name=self.root_name # Пробрасываем корень
             )
             self.children_nodes.append(child_node)
         self.children_loaded = True
     
     def on_checkbox_change(self):
-        """Обработка изменения состояния чекбокса с защитой от дублей"""
-        if self.is_selected():
-            # ЗАЩИТА: Если мы выбрали этот узел, нужно снять галочки со всех
-            # предков и потомков в этой ветке, так как они либо дублируют данные,
-            # либо этот узел их заменяет.
-            
-            # 1. Снимаем у всех детей (рекурсивно)
-            self._uncheck_descendants()
-            
-            # 2. Снимаем у всех родителей (вверх по дереву)
+        """Обработка изменения состояния чекбокса с распространением на детей и родителей"""
+        is_sel = self.is_selected()
+        
+        # 1. Проброс состояния ВСЕМ потомкам (рекурсивно)
+        self._set_descendants_selected(is_sel)
+        
+        # 2. Если мы СНЯЛИ галочку, нужно снять её и у всех предков
+        if not is_sel:
             self._uncheck_ancestors()
             
         if self.on_change_callback:
             self.on_change_callback()
 
-    def _uncheck_descendants(self):
-        """Снять галочки со всех дочерних элементов"""
+    def _set_descendants_selected(self, value):
+        """Рекурсивно установить состояние для всех загруженных детей"""
         for child in self.children_nodes:
-            child.set_selected(False)
-            child._uncheck_descendants()
+            child.set_selected(value)
+            child._set_descendants_selected(value)
 
     def _uncheck_ancestors(self):
-        """Снять галочку с родителя и выше"""
+        """Снять галочку с родителя и выше (если один из детей снят, родитель не может быть 'выбран целиком')"""
         if self.parent_node:
             self.parent_node.set_selected(False)
             self.parent_node._uncheck_ancestors()
@@ -167,23 +168,53 @@ class CategoryTreeNode:
             self.checkbox.deselect()
     
     
-    def get_selected_ids(self):
-        """Получить ID всех выбранных категорий (умный сбор без дублей)"""
-        selected = []
+    def get_selected_info(self, current_path=None):
+        """Получить ID и полные пути всех выбранных категорий (умный сбор с авто-раскрытием веток)"""
+        # Если это корень (первый вызов), начинаем путь с пустой структуры.
+        # Раньше сюда добавлялся root_name (группировка из конфига), что смещало уровни.
+        if current_path is None:
+            current_path = []
+        
+        # Название текущего узла
+        node_title = self.category_data.get('title', 'Unknown')
+        new_path = current_path + [node_title]
+        
+        info = []
         
         if self.is_selected():
-            # Если выбрана родительская категория - возвращаем ТОЛЬКО её ID.
-            # В API Петрович товары родителя УЖЕ включают в себя все товары детей.
-            # Поэтому запрашивать детей отдельно - значит плодить дубли.
-            cat_id = self.category_data.get('code')
-            if cat_id:
-                selected.append(cat_id)
+            # Если выбран этот узел - собираем ВСЕ дочерние ЛИСТОВЫЕ категории.
+            # Это решает проблему "не парсятся главные", так как парсятся их дети-листья.
+            info.extend(self._collect_leaf_info_from_data(self.category_data, current_path))
         else:
-            # Если сам родитель не выбран - проверяем, не выбраны ли его дети по отдельности
+            # Если сам узел не выбран - проверяем, не выбраны ли его дети в GUI
+            # Важно: это работает только для УЖЕ загруженных (раскрытых) детей.
+            # Но так как родитель не выбран, а дети могут быть выбраны только если их раскрыли вручную,
+            # то коллекция по loaded nodes - это правильно.
             for child in self.children_nodes:
-                selected.extend(child.get_selected_ids())
+                info.extend(child.get_selected_info(new_path))
         
-        return selected
+        return info
+
+    def _collect_leaf_info_from_data(self, data, path_prefix):
+        """Рекурсивно собирает ID и пути всех листовых категорий из сырых данных"""
+        title = data.get('title', 'Unknown')
+        current_path = path_prefix + [title]
+        children = data.get('children', [])
+        
+        if not children:
+            # Это лист (leaf) - именно его мы и будем парсить
+            return [{'id': data.get('code'), 'path': current_path}]
+        else:
+            # Не лист, идем вглубь ко всем детям в данных (даже если они не загружены в GUI)
+            leaves = []
+            for child_data in children:
+                leaves.extend(self._collect_leaf_info_from_data(child_data, current_path))
+            return leaves
+
+    def get_selected_ids(self):
+        """Для совместимости: возвращает просто список ID из get_selected_info"""
+        info = self.get_selected_info()
+        return [item['id'] for item in info]
     
     def _collect_all_child_ids_from_data(self):
         """Рекурсивно собрать ID этой категории и всех дочерних из данных"""
@@ -335,19 +366,19 @@ class PetrovichApp(ctk.CTk):
         self.columns_list_frame.pack(fill="both", expand=True, padx=5, pady=5)
         
         self.column_options_map = {
-            'sku (Артикул)': 'article',
-            'name (Название)': 'name',
-            'unit (Ед. изм.)': 'unit',
-            'price (Цена .)': 'price',
-            'weight (Вес .)': 'weight',
-            'supplier (Петрович)': 'supplier',
-            'image (Картинка)': 'image',
-            'product_url (Ссылка)': 'url',
-            'category1 (Категория 1)': 'level1',
-            'category2 (Категория 2)': 'level2',
-            'category3 (Категория 3)': 'level3',
-            'category4 (Категория 4)': 'level4',
-            'supplers (Поставщик)': 'brand',
+            'Артикул': 'article',
+            'Наименование': 'name',
+            'Единица измерения': 'unit',
+            'Цена': 'price',
+            'Поставщик (Бренд)': 'brand',
+            'Вес (кг)': 'weight',
+            'Категория LV1': 'level1',
+            'Категория LV2': 'level2',
+            'Категория LV3': 'level3',
+            'Категория LV4': 'level4',
+            'URL изображения': 'image',
+            'Ссылка на товар': 'url',
+            'Источник (Петрович)': 'supplier',
             '--- Отключено ---': None
         }
         
@@ -356,9 +387,10 @@ class PetrovichApp(ctk.CTk):
         
         # Создаем 12 слотов
         initial_order = [
-            'sku (Артикул)', 'name (Название)', 'unit (Ед. изм.)', 'price (Цена .)', 
-            'weight (Вес .)', 'supplers (Поставщик)', 'image (Картинка)', 'product_url (Ссылка)',
-            'category1 (Категория 1)', 'category2 (Категория 2)', 'category3 (Категория 3)', '--- Отключено ---'
+            'Артикул', 'Наименование', 'Единица измерения', 'Цена', 
+            'Поставщик (Бренд)', 'Вес (кг)', 
+            'Категория LV1', 'Категория LV2', 'Категория LV3', 'Категория LV4',
+            'URL изображения', '--- Отключено ---'
         ]
         
         # Загрузка сохраненных настроек
@@ -386,9 +418,9 @@ class PetrovichApp(ctk.CTk):
             
             # Подсказки под селекторами
             hint_text = ""
-            if "price" in val_to_set.lower() or "weight" in val_to_set.lower():
+            if "цена" in val_to_set.lower() or "вес" in val_to_set.lower():
                 hint_text = "Число с точкой"
-            elif "sku" in val_to_set.lower():
+            elif "артикул" in val_to_set.lower():
                 hint_text = "ID товара"
             ctk.CTkLabel(slot_frame, text=hint_text, font=ctk.CTkFont(size=10), text_color="gray").pack()
 
@@ -487,7 +519,8 @@ class PetrovichApp(ctk.CTk):
                         cat_data,
                         level=0,
                         on_change_callback=self.on_category_selection_change,
-                        saved_selected=saved_selected
+                        saved_selected=saved_selected,
+                        root_name=parent_name # Передаем название группы (L1)
                     )
                     
                     self.category_tree_nodes.append(tree_node)
@@ -625,9 +658,10 @@ class PetrovichApp(ctk.CTk):
     def reset_columns_event(self):
         """Сбросить колонки к дефолтным значениям"""
         default_order = [
-            'sku (Артикул)', 'name (Название)', 'unit (Ед. изм.)', 'price (Цена .)', 
-            'weight (Вес .)', 'supplers (Поставщик)', 'image (Картинка)', 'product_url (Ссылка)',
-            'category1 (Категория 1)', 'category2 (Категория 2)', 'category3 (Категория 3)', '--- Отключено ---'
+            'Артикул', 'Наименование', 'Единица измерения', 'Цена', 
+            'Поставщик (Бренд)', 'Вес (кг)', 
+            'Категория LV1', 'Категория LV2', 'Категория LV3', 'Категория LV4',
+            'URL изображения', '--- Отключено ---'
         ]
         
         for i, selector in enumerate(self.column_selectors):
@@ -745,10 +779,19 @@ class PetrovichApp(ctk.CTk):
             # Собираем выбранные колонки
             current_cols = [s.get() for s in self.column_selectors]
             
-            # Собираем ID выбранных категорий
+            # Собираем ID выбранных категорий (включая тех, что выбраны через родителей)
             selected_ids = []
             for node in self.category_tree_nodes:
-                selected_ids.extend(node.get_selected_ids())
+                # В settings.json сохраняем именно "честные" выбранные ID из GUI,
+                # чтобы при перезагрузке галочки стояли там же.
+                def collect_gui_selected(n):
+                    ids = []
+                    if n.is_selected():
+                        ids.append(n.get_category_id())
+                    for c in n.children_nodes:
+                        ids.extend(collect_gui_selected(c))
+                    return ids
+                selected_ids.extend(collect_gui_selected(node))
             
             settings = {
                 "columns": current_cols,
@@ -767,16 +810,16 @@ class PetrovichApp(ctk.CTk):
         self.update_log("[OK] Nastroyki sohranyeny!\n")
 
     def start_parsing_event(self):
-        # Собираем выбранные ID категорий
-        selected_ids = []
+        # Собираем информацию о категориях (ID + пути)
+        selected_info = []
         for node in self.category_tree_nodes:
-            selected_ids.extend(node.get_selected_ids())
+            selected_info.extend(node.get_selected_info())
         
-        if not selected_ids:
+        if not selected_info:
             self.update_log("VNIMANIE: Kategorii ne vybrany!\n")
             return
 
-        # Сохраняем настройки перед запуском
+        # Сохраняем настройки перед запуском (теперь сохраняет ID из info)
         self.save_settings_auto()
 
         # Собираем колонки (включая пустые/отключенные)
@@ -805,17 +848,17 @@ class PetrovichApp(ctk.CTk):
         self.stop_button.configure(state="normal", text="ОСТАНОВИТЬ")
         self.progress_bar.set(0)
         self.update_log(f"\n--- ZAPUSK PARSINGA V {datetime.now().strftime('%H:%M:%S')} ---\n")
-        self.update_log(f"Vybrano kategoriy: {len(selected_ids)}\n")
+        self.update_log(f"Vybrano konechnykh kategoriy: {len(selected_info)}\n")
         
         # ДИАГНОСТИКА: показываем ID
-        self.update_log(f"ID kategoriy: {', '.join(str(id) for id in selected_ids)}\n")
+        # self.update_log(f"ID kategoriy: {', '.join(str(id) for id in selected_ids)}\n") # This line is removed as per the instruction.
         
         # Запуск в потоке
-        self.parsing_thread = threading.Thread(target=self.run_parser_thread, args=(selected_ids, limit, selected_cols))
+        self.parsing_thread = threading.Thread(target=self.run_parser_thread, args=(selected_info, limit, selected_cols))
         self.parsing_thread.daemon = True
         self.parsing_thread.start()
 
-    def run_parser_thread(self, selected_ids, limit, selected_cols):
+    def run_parser_thread(self, selected_info, limit, selected_cols):
         try:
             # Используем уже созданный парсер
             if not self.parser:
@@ -828,9 +871,9 @@ class PetrovichApp(ctk.CTk):
             # Используем метод run() парсера с параллельной загрузкой
             self.update_log(f"\nIspolzuem parallelnuyu zagruzku (5 potokov)!\n")
             
-            # run() ожидает список ID (строк), передаем их напрямую
+            # run() ожидает список объектов (dict) или ID
             output_file = self.parser.run(
-                selected_categories=selected_ids,
+                selected_categories=selected_info,
                 max_products_per_cat=limit,
                 selected_columns=selected_cols,
                 use_deep_parsing=True,
