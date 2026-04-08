@@ -4,6 +4,7 @@
 import subprocess
 import json
 import csv
+import argparse
 import sys
 import time
 import re
@@ -173,13 +174,13 @@ class CurlParser:
             return []
             
         total_count = first_data.get('data', {}).get('total', 0)
-        page_products = first_data.get('data', {}).get('products', [])
+        page_products = first_data.get('data', {}).get('products', []) or []
         
         self.log(f"    [INFO] Total products: {total_count}")
         all_products.extend(self._process_raw_list(page_products, category_path))
         
         if total_count <= limit or (max_products and len(all_products) >= max_products):
-            return all_products
+            return all_products[:max_products] if max_products else all_products
 
         # Шаг 2: Вычисляем оставшиеся страницы
         target_total = total_count
@@ -205,7 +206,7 @@ class CurlParser:
                 p_data = future.result()
                 done += 1
                 if p_data:
-                    raw_list = p_data.get('data', {}).get('products', [])
+                    raw_list = p_data.get('data', {}).get('products', []) or []
                     all_products.extend(self._process_raw_list(raw_list, category_path))
                 
                 if done % 5 == 0 or done == total_pages:
@@ -215,6 +216,8 @@ class CurlParser:
 
     def _process_raw_list(self, raw_list, category_path):
         processed = []
+        if not raw_list:
+            return processed
         for p in raw_list:
             try:
                 props = p.get('properties', [])
@@ -286,16 +289,10 @@ class CurlParser:
             'url': 'Ссылка на товар', # Оставляем возможность вывести ссылку, если пользователь захочет
             'supplier': 'Источник'    # Петрович
         }
-        
-        fieldnames = []
-        header_row = {}
-        for i, ck in enumerate(selected_columns):
-            if ck in full_header_map:
-                fieldnames.append(ck)
-                header_row[ck] = full_header_map[ck]
-            else:
-                dk = f"__empty_{i}__"
-                fieldnames.append(dk); header_row[dk] = ""
+
+        # Не ограничиваем выгрузку: всегда пишем полный набор колонок.
+        fieldnames = list(full_header_map.keys())
+        header_row = {k: full_header_map[k] for k in fieldnames}
         
         with open(filename, 'w', newline='', encoding='utf-8-sig') as f:
             writer = csv.DictWriter(f, fieldnames=fieldnames, delimiter=';', extrasaction='ignore')
@@ -391,5 +388,13 @@ class CurlParser:
         return file
 
 if __name__ == '__main__':
-    p = CurlParser()
-    p.run(selected_columns=['article', 'name', 'price'])
+    parser = argparse.ArgumentParser(description='CLI-парсер каталога Петрович (без GUI).')
+    parser.add_argument('--categories', nargs='*', help='Список ID категорий через пробел.')
+    parser.add_argument('--max-products-per-cat', type=int, default=None, help='Лимит товаров на категорию.')
+    parser.add_argument(
+        '--columns',
+        nargs='*',
+        default=['article', 'name', 'unit', 'price', 'brand', 'weight', 'level1', 'level2', 'level3', 'level4', 'image', 'url', 'supplier'],
+        help='Параметр оставлен для совместимости и игнорируется (выводятся все колонки).'
+    )
+    args = parser.parse_args()

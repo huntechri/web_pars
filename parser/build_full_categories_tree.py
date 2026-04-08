@@ -151,4 +151,3 @@ def build_full_tree():
 
 if __name__ == '__main__':
     build_full_tree()
-

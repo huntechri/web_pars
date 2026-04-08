@@ -13,7 +13,7 @@
 pip install customtkinter pillow
 
 # 2. Сгенерировать дерево категорий (займет ~5-10 минут)
-python build_full_categories_tree.py
+python parser/build_full_categories_tree.py
 
 # 3. Запустить GUI
 python app_gui.py
@@ -46,8 +46,8 @@ python app_gui.py
 | Файл | Описание |
 |------|----------|
 | **`app_gui.py`** | ⭐ Главное GUI приложение |
-| **`full_auto_parser_CURL.py`** | Парсер с рекурсивным обходом категорий |
-| **`build_full_categories_tree.py`** | Генератор дерева категорий |
+| **`parser/full_auto_parser_CURL.py`** | Парсер с рекурсивным обходом категорий |
+| **`parser/build_full_categories_tree.py`** | Генератор дерева категорий |
 
 ### **Конфигурация:**
 
@@ -120,7 +120,7 @@ python app_gui.py
 Если на сайте появились новые категории:
 
 ```powershell
-python build_full_categories_tree.py
+python parser/build_full_categories_tree.py
 ```
 
 ### **Настройка куков**
@@ -133,7 +133,7 @@ python build_full_categories_tree.py
 
 ### **Параллельная загрузка**
 
-В коде `full_auto_parser_CURL.py` можно изменить параметры:
+В коде `parser/full_auto_parser_CURL.py` можно изменить параметры:
 
 ```python
 # Генерация дерева (по умолчанию: 10)
@@ -195,7 +195,7 @@ level1,level2,level3,level4,article,name,price,unit,brand,weight,image,url
 Проверьте наличие `categories_full_tree.json`:
 
 ```powershell
-python build_full_categories_tree.py
+python parser/build_full_categories_tree.py
 ```
 
 ### **Слишком долго парсится**
