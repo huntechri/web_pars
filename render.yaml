@@ -1,0 +1,23 @@
+services:
+  - type: web
+    name: petrovich-parser-api
+    runtime: python
+    plan: starter
+    region: frankfurt
+    buildCommand: pip install -r backend/requirements.txt
+    startCommand: python -m uvicorn backend.app.main:app --host 0.0.0.0 --port $PORT
+    envVars:
+      - key: APP_DATABASE_URL
+        sync: false
+      - key: APP_JWT_SECRET
+        sync: false
+      - key: APP_JWT_ALGORITHM
+        value: HS256
+      - key: APP_JWT_EXPIRE_MINUTES
+        value: "720"
+      - key: APP_ADMIN_USERNAME
+        value: admin
+      - key: APP_ADMIN_PASSWORD
+        sync: false
+      - key: APP_FRONTEND_ORIGIN
+        sync: false

@@ -1,0 +1,104 @@
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  font-family: Inter, Arial, sans-serif;
+  background: #f5f7fb;
+  color: #1f2937;
+}
+
+.container {
+  max-width: 1000px;
+  margin: 0 auto;
+  padding: 24px;
+}
+
+.card {
+  background: #fff;
+  border-radius: 12px;
+  padding: 20px;
+  box-shadow: 0 1px 8px rgba(15, 23, 42, 0.08);
+}
+
+input,
+button {
+  font-size: 14px;
+}
+
+input {
+  width: 100%;
+  padding: 10px;
+  border: 1px solid #d1d5db;
+  border-radius: 8px;
+}
+
+button {
+  background: #2563eb;
+  border: none;
+  color: white;
+  padding: 10px 14px;
+  border-radius: 8px;
+  cursor: pointer;
+}
+
+button:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.error {
+  color: #b91c1c;
+}
+
+.row {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+}
+
+.login-wrap {
+  max-width: 420px;
+  padding-top: 80px;
+}
+
+.mb-12 {
+  margin-bottom: 12px;
+}
+
+.mt-16 {
+  margin-top: 16px;
+}
+
+.mt-20 {
+  margin-top: 20px;
+}
+
+.space-between {
+  justify-content: space-between;
+}
+
+.m-0 {
+  margin: 0;
+}
+
+.tree-node {
+  margin-top: 6px;
+}
+
+.tree-level-0 { margin-left: 0; }
+.tree-level-1 { margin-left: 16px; }
+.tree-level-2 { margin-left: 32px; }
+.tree-level-3 { margin-left: 48px; }
+.tree-level-4 { margin-left: 64px; }
+.tree-level-5 { margin-left: 80px; }
+.tree-level-6 { margin-left: 96px; }
+
+.tree-indent {
+  width: 16px;
+}
+
+.section-gap {
+  margin-bottom: 14px;
+}

@@ -57,3 +57,7 @@ build/
 dist/
 *.exe
 *.spec
+
+# Web app env files
+backend/.env
+frontend/.env.local
