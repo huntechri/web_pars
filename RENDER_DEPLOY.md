@@ -89,6 +89,26 @@
 
 И задайте те же env-переменные, что выше.
 
+### Почему у вас виден только `petrovich-parser-api`
+
+Если вы изначально создали только один Web Service (API), то при обычном `git push`
+Render **не создаёт автоматически** второй сервис из `render.yaml`.
+
+Чтобы появился фронтенд, нужно сделать одно из двух:
+
+1. **Через Blueprint (рекомендуется)**
+   - Render -> New -> Blueprint -> выбрать этот репозиторий
+   - применить план, в котором будет `petrovich-parser-frontend`
+
+2. **Вручную создать frontend-сервис**
+   - Render -> New -> Web Service -> этот же репозиторий
+   - Name: `petrovich-parser-frontend`
+   - Runtime: Node
+   - Root Directory: `frontend`
+   - Build Command: `npm ci && npm run build`
+   - Start Command: `npm run start -- -H 0.0.0.0 -p $PORT`
+   - Env: `NEXT_PUBLIC_API_BASE_URL=https://petrovich-parser-api.onrender.com`
+
 ---
 
 ## Важные нюансы для Render
