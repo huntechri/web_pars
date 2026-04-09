@@ -7,10 +7,19 @@ import { apiFetch, getApiBaseUrl } from "../../lib/api";
 type TreeNode = {
   code?: string | number;
   title: string;
+  product_qty?: number;
   children?: TreeNode[];
 };
 
 type GroupedTree = Record<string, TreeNode[]>;
+
+type JobProgress = {
+  status: string;
+  progress_percent: number;
+  products_collected: number;
+  categories_done: number;
+  categories_total: number;
+};
 
 function collectDescendantCodes(node: TreeNode): string[] {
   const own = node.code ? [String(node.code)] : [];
@@ -25,15 +34,21 @@ function collectSelectedNodes(
 ): Array<{ id: string; path: string[] }> {
   const result: Array<{ id: string; path: string[] }> = [];
 
-  const walk = (node: TreeNode, path: string[]) => {
+  const walk = (node: TreeNode, path: string[], hasSelectedAncestor: boolean) => {
     const nextPath = [...path, node.title];
-    if (node.code && selectedCodes.has(String(node.code))) {
+    const isSelected = !!(node.code && selectedCodes.has(String(node.code)));
+
+    // Если выбран родитель, не отправляем выбранных потомков отдельно:
+    // это убирает дублирующий парсинг parent + child, сохраняя поведение UI.
+    if (isSelected && !hasSelectedAncestor) {
       result.push({ id: String(node.code), path: nextPath });
     }
-    (node.children || []).forEach((child) => walk(child, nextPath));
+
+    const nextHasSelectedAncestor = hasSelectedAncestor || isSelected;
+    (node.children || []).forEach((child) => walk(child, nextPath, nextHasSelectedAncestor));
   };
 
-  Object.values(groups).forEach((arr) => arr.forEach((n) => walk(n, parentPath)));
+  Object.values(groups).forEach((arr) => arr.forEach((n) => walk(n, parentPath, false)));
   return result;
 }
 
@@ -66,6 +81,7 @@ function TreeItem({
           <span className="tree-indent" />
         )}
         <span>{node.title}</span>
+        <span className="category-qty">({node.product_qty ?? 0} шт.)</span>
       </label>
       {(node.children || []).map((child) => (
         <TreeItem key={`${child.code || child.title}-${level}`} node={child} selected={selected} toggle={toggle} level={level + 1} />
@@ -83,6 +99,9 @@ export default function DashboardPage() {
   const [jobId, setJobId] = useState("");
   const [jobStatus, setJobStatus] = useState("");
   const [jobError, setJobError] = useState("");
+  const [jobProgress, setJobProgress] = useState<JobProgress | null>(null);
+  const [jobStartedAtMs, setJobStartedAtMs] = useState<number | null>(null);
+  const [jobProductsTotalEstimate, setJobProductsTotalEstimate] = useState<number>(0);
   const [loading, setLoading] = useState(false);
   const [refreshingCategories, setRefreshingCategories] = useState(false);
 
@@ -110,16 +129,23 @@ export default function DashboardPage() {
 
     const timer = setInterval(async () => {
       try {
-        const job = await apiFetch(`/api/parser/jobs/${jobId}`, {}, token);
+        const [job, progress] = await Promise.all([
+          apiFetch(`/api/parser/jobs/${jobId}`, {}, token),
+          apiFetch(`/api/parser/jobs/${jobId}/progress`, {}, token)
+        ]);
         setJobStatus(job.status);
         setJobError(job.error || "");
+        setJobProgress(progress);
+        if (!jobStartedAtMs && (job.status === "running" || progress.status === "running")) {
+          setJobStartedAtMs(Date.now());
+        }
       } catch {
         // ignore poll errors
       }
     }, 3000);
 
     return () => clearInterval(timer);
-  }, [jobId, token]);
+  }, [jobId, token, jobStartedAtMs]);
 
   const selectedCount = selected.size;
 
@@ -127,6 +153,45 @@ export default function DashboardPage() {
     () => collectSelectedNodes(categories, selected),
     [categories, selected]
   );
+
+  const categoryQtyByCode = useMemo(() => {
+    const m = new Map<string, number>();
+    const walk = (node: TreeNode) => {
+      if (node.code) {
+        m.set(String(node.code), Number(node.product_qty || 0));
+      }
+      (node.children || []).forEach(walk);
+    };
+
+    Object.values(categories).forEach((nodes) => nodes.forEach(walk));
+    return m;
+  }, [categories]);
+
+  const selectedProductsEstimate = useMemo(() => {
+    let total = 0;
+    selected.forEach((code) => {
+      total += categoryQtyByCode.get(code) || 0;
+    });
+    return total;
+  }, [selected, categoryQtyByCode]);
+
+  const productsSpeedPerMinute = useMemo(() => {
+    if (!jobProgress || !jobStartedAtMs) {
+      return 0;
+    }
+
+    const elapsedMs = Date.now() - jobStartedAtMs;
+    if (elapsedMs <= 0) {
+      return 0;
+    }
+
+    const elapsedMinutes = elapsedMs / 60000;
+    if (elapsedMinutes <= 0) {
+      return 0;
+    }
+
+    return jobProgress.products_collected / elapsedMinutes;
+  }, [jobProgress, jobStartedAtMs, jobStatus]);
 
   function toggleNode(node: TreeNode, checked: boolean) {
     const codes = collectDescendantCodes(node);
@@ -161,12 +226,27 @@ export default function DashboardPage() {
       );
       setJobId(job.id);
       setJobStatus(job.status);
+      setJobStartedAtMs(Date.now());
+      setJobProductsTotalEstimate(selectedProductsEstimate);
+      setJobProgress({
+        status: job.status,
+        progress_percent: 0,
+        products_collected: 0,
+        categories_done: 0,
+        categories_total: payloadCategories.length
+      });
     } catch (e) {
       setJobError("Не удалось запустить парсер");
     } finally {
       setLoading(false);
     }
   }
+
+  const productsProgressMax = Math.max(
+    1,
+    jobProductsTotalEstimate,
+    jobProgress?.products_collected || 0
+  );
 
   function downloadCsv() {
     if (!jobId || !token) {
@@ -257,6 +337,27 @@ export default function DashboardPage() {
           <h3>Статус</h3>
           <p>Job ID: {jobId || "—"}</p>
           <p>Состояние: {jobStatus || "—"}</p>
+          {jobId ? (
+            <div className="progress-wrap">
+              <div className="progress-label-row">
+                <span>
+                  Товары: {jobProgress?.products_collected ?? 0}
+                  {jobProductsTotalEstimate > 0 ? ` / ${jobProductsTotalEstimate}` : ""} шт.
+                </span>
+              </div>
+              <progress
+                className="progress-native"
+                max={productsProgressMax}
+                value={Math.max(0, Math.min(productsProgressMax, jobProgress?.products_collected ?? 0))}
+              />
+              <p className="progress-sub">
+                Категории: {jobProgress?.categories_done ?? 0}/{jobProgress?.categories_total ?? 0}
+              </p>
+              <p className="progress-sub">
+                Скорость: {Number.isFinite(productsSpeedPerMinute) ? productsSpeedPerMinute.toFixed(1) : "0.0"} шт./мин
+              </p>
+            </div>
+          ) : null}
           {jobError ? <p className="error">{jobError}</p> : null}
           <button onClick={downloadCsv} disabled={jobStatus !== "done"}>
             Скачать CSV

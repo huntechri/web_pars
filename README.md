@@ -23,6 +23,7 @@
 	- API запуска задач
 	- API статуса задачи
 	- API скачивания результата
+	- выгрузка CSV в Cloudflare R2 (S3 API)
 - DB (PostgreSQL):
 	- `users`
 	- `parse_jobs`
@@ -42,6 +43,16 @@ pip install -r backend/requirements.txt
 copy backend/.env.example backend/.env
 python backend/run_api.py
 ```
+
+В [backend/.env.example](backend/.env.example) можно задать:
+- `APP_PARSER_COOKIES` (JSON-объект cookies)
+- `APP_PARSER_HEADERS` (JSON-объект headers)
+- `APP_STORAGE_BUCKET` (имя R2 bucket)
+- `APP_STORAGE_ENDPOINT_URL` (например `https://<account_id>.eu.r2.cloudflarestorage.com`)
+- `APP_STORAGE_ACCESS_KEY_ID`
+- `APP_STORAGE_SECRET_ACCESS_KEY`
+- `APP_STORAGE_REGION` (обычно `auto`)
+- `APP_STORAGE_PRESIGN_EXPIRE_SECONDS` (время жизни временной ссылки на скачивание)
 
 API: http://localhost:8000
 
@@ -64,6 +75,14 @@ Web: http://localhost:3000
 - `POST /api/parser/run`
 - `GET /api/parser/jobs/{job_id}`
 - `GET /api/parser/jobs/{job_id}/download`
+
+## Хранение CSV
+
+- После завершения парсинга CSV загружается в Cloudflare R2 (если заполнены `APP_STORAGE_*`).
+- Локальный файл после успешной загрузки удаляется.
+- Ключи в R2 формируются по датам:
+	- `exports/YYYY/MM/DD/{job_id}/petrovich_turbo_YYYYMMDD_HHMMSS.csv`
+- Если object storage выключен, используется локальный fallback (поведение как раньше).
 
 ## Важно про ядро
 

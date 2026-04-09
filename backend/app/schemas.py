@@ -20,6 +20,7 @@ class UserOut(BaseModel):
 class CategoryNode(BaseModel):
     code: str | int | None = None
     title: str = ""
+    product_qty: int = 0
     children: list["CategoryNode"] = Field(default_factory=list)
 
 
@@ -35,6 +36,14 @@ class ParseJobResponse(BaseModel):
     error: str | None = None
     created_at: datetime
     updated_at: datetime
+
+
+class ParseJobProgressResponse(BaseModel):
+    status: str
+    progress_percent: int = 0
+    products_collected: int = 0
+    categories_done: int = 0
+    categories_total: int = 0
 
 
 CategoryNode.model_rebuild()

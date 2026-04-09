@@ -6,6 +6,7 @@ from typing import Any
 
 from parser.full_auto_parser_CURL import CurlParser
 
+from ..config import settings
 from ..database import SessionLocal
 from ..models import Category
 
@@ -105,7 +106,10 @@ def _fetch_full_category_tree(parser: CurlParser, category_id: str, level: int =
 
 def rebuild_categories_tree(project_root: Path, max_level: int = 3):
     with _refresh_lock:
-        parser = CurlParser()
+        parser = CurlParser(
+            cookies_raw=settings.parser_cookies,
+            headers_raw=settings.parser_headers,
+        )
 
         categories_by_parent: dict[str, list[dict]] = {}
         for cat in parser.categories:

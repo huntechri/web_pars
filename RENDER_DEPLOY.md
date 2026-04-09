@@ -15,6 +15,8 @@
    - `APP_JWT_SECRET` = случайная длинная строка
    - `APP_ADMIN_PASSWORD` = надежный пароль
    - `APP_FRONTEND_ORIGIN` = URL фронтенда (например, `https://your-frontend.onrender.com`)
+  - `APP_PARSER_COOKIES` = JSON-объект cookies (опционально)
+  - `APP_PARSER_HEADERS` = JSON-объект headers (опционально)
 
 ## 3) Важно про URL БД
 

@@ -2,14 +2,17 @@ from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import FileResponse
+from fastapi.responses import StreamingResponse
+import requests
 from sqlalchemy.orm import Session
 
 from ..config import PROJECT_ROOT
 from ..database import get_db
 from ..deps import get_current_user
 from ..models import ParseJob, User
-from ..schemas import ParseJobResponse, StartParseRequest
-from ..services.parser_jobs import start_job
+from ..schemas import ParseJobProgressResponse, ParseJobResponse, StartParseRequest
+from ..services.parser_jobs import get_job_progress, start_job
+from ..services.storage import get_download_url, is_object_storage_enabled
 
 
 router = APIRouter(prefix="/api/parser", tags=["parser"])
@@ -62,6 +65,22 @@ def get_job(job_id: str, db: Session = Depends(get_db), current_user: User = Dep
     )
 
 
+@router.get("/jobs/{job_id}/progress", response_model=ParseJobProgressResponse)
+def get_job_parse_progress(job_id: str, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    job = db.query(ParseJob).filter(ParseJob.id == job_id, ParseJob.user_id == current_user.id).first()
+    if not job:
+        raise HTTPException(status_code=404, detail="Задача не найдена")
+
+    progress = get_job_progress(job_id)
+    return ParseJobProgressResponse(
+        status=progress.get("status", job.status),
+        progress_percent=int(progress.get("progress_percent", 0) or 0),
+        products_collected=int(progress.get("products_collected", 0) or 0),
+        categories_done=int(progress.get("categories_done", 0) or 0),
+        categories_total=int(progress.get("categories_total", 0) or 0),
+    )
+
+
 @router.get("/jobs/{job_id}/download")
 def download_job_result(job_id: str, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     job = db.query(ParseJob).filter(ParseJob.id == job_id, ParseJob.user_id == current_user.id).first()
@@ -71,7 +90,34 @@ def download_job_result(job_id: str, db: Session = Depends(get_db), current_user
         raise HTTPException(status_code=400, detail="Файл пока не готов")
 
     path = Path(job.output_file)
-    if not path.exists():
-        raise HTTPException(status_code=404, detail="Файл результата не найден")
+    if path.exists():
+        return FileResponse(path=str(path), filename=path.name, media_type="text/csv")
 
-    return FileResponse(path=str(path), filename=path.name, media_type="text/csv")
+    if is_object_storage_enabled():
+        try:
+            url = get_download_url(job.output_file)
+            response = requests.get(url, stream=True, timeout=120)
+            if response.status_code != 200:
+                raise HTTPException(status_code=502, detail="Ошибка скачивания файла из object storage")
+
+            filename = Path(job.output_file).name or f"{job_id}.csv"
+
+            def iter_chunks():
+                try:
+                    for chunk in response.iter_content(chunk_size=1024 * 1024):
+                        if chunk:
+                            yield chunk
+                finally:
+                    response.close()
+
+            return StreamingResponse(
+                iter_chunks(),
+                media_type="text/csv",
+                headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+            )
+        except HTTPException:
+            raise
+        except Exception:
+            raise HTTPException(status_code=500, detail="Не удалось подготовить ссылку на скачивание")
+
+    raise HTTPException(status_code=404, detail="Файл результата не найден")

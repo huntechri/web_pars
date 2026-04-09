@@ -10,10 +10,14 @@ import time
 import re
 import io
 import os
+import ast
 import shutil
 import requests
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
+
+
+DEFAULT_USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36'
 
 def resource_path(relative_path):
     """ Get absolute path to resource, works for dev and for PyInstaller """
@@ -36,16 +40,19 @@ def ensure_config_exists(filename):
     return os.path.exists(filename)
 
 class CurlParser:
-    def __init__(self, log_callback=None, progress_callback=None):
+    def __init__(self, log_callback=None, progress_callback=None, cookies_raw=None, headers_raw=None):
         self.log_callback = log_callback
         self.progress_callback = progress_callback
         self.base_url = "https://api.petrovich.ru/catalog/v5/sections"
         self.stop_requested = False
         
         # Загрузка настроек
-        self.cookies_raw, self.headers_from_cook = self.load_cookies_and_headers()
+        self.cookies_raw, self.headers_from_cook = self.load_cookies_and_headers(
+            cookies_raw=cookies_raw,
+            headers_raw=headers_raw,
+        )
         
-        self.user_agent = self.headers_from_cook.get('User-Agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36')
+        self.user_agent = self.headers_from_cook.get('User-Agent', DEFAULT_USER_AGENT)
         
         self.headers = {
             'Accept': 'application/json, text/plain, */*',
@@ -58,6 +65,9 @@ class CurlParser:
             'Sec-Fetch-Mode': 'cors',
             'Sec-Fetch-Site': 'same-site'
         }
+        self.headers.update(self.headers_from_cook)
+        if 'User-Agent' not in self.headers:
+            self.headers['User-Agent'] = self.user_agent
         
         # Подготовка сессии requests (для ТУРБО режима)
         self.session = requests.Session()
@@ -78,15 +88,63 @@ class CurlParser:
         else:
             print(message, end=end, flush=True)
 
-    def load_cookies_and_headers(self):
+    def _normalize_headers_or_cookies(self, data):
+        if isinstance(data, str):
+            raw = data.strip()
+            if not raw:
+                return {}
+            try:
+                data = json.loads(raw)
+            except Exception:
+                try:
+                    data = ast.literal_eval(raw)
+                except Exception:
+                    return {}
+
+        if not isinstance(data, dict):
+            return {}
+        normalized = {}
+        for k, v in data.items():
+            if k is None or v is None:
+                continue
+            normalized[str(k)] = str(v)
+        return normalized
+
+    def _load_json_env_dict(self, env_name):
+        raw = os.getenv(env_name, '').strip()
+        if not raw:
+            return {}
+        parsed = self._normalize_headers_or_cookies(raw)
+        if parsed:
+            return parsed
+        self.log(f"WARN: failed to parse {env_name}; expected JSON object or Python dict literal")
+        return {}
+
+    def load_cookies_and_headers(self, cookies_raw=None, headers_raw=None):
+        # 1) Явно переданные значения (из backend settings)
+        normalized_cookies = self._normalize_headers_or_cookies(cookies_raw)
+        normalized_headers = self._normalize_headers_or_cookies(headers_raw)
+        if normalized_cookies or normalized_headers:
+            return normalized_cookies, normalized_headers
+
+        # 2) ENV-переменные
+        env_cookies = self._load_json_env_dict('APP_PARSER_COOKIES')
+        env_headers = self._load_json_env_dict('APP_PARSER_HEADERS')
+        if env_cookies or env_headers:
+            return env_cookies, env_headers
+
+        # 3) Fallback на Cook для обратной совместимости
         try:
             ensure_config_exists('Cook')
             namespace = {}
             with open('Cook', 'r', encoding='utf-8') as f:
                 exec(f.read(), namespace)
-            return namespace.get('cookies', {}), namespace.get('headers', {})
+            return (
+                self._normalize_headers_or_cookies(namespace.get('cookies', {})),
+                self._normalize_headers_or_cookies(namespace.get('headers', {})),
+            )
         except Exception as e:
-            self.log(f"ОШИБКА чтения файла Cook: {e}")
+            self.log(f"WARN: unable to load cookies/headers from Cook: {e}")
             return {}, {}
 
     def load_categories(self):
@@ -139,10 +197,17 @@ class CurlParser:
         cmd = [
             'curl.exe', '--noproxy', '*', '-s', '-L',
             '--connect-timeout', '15',
-            '-H', f'Cookie: {self.cookie_string}',
-            '-H', f'User-Agent: {self.user_agent}',
-            url
         ]
+
+        if self.cookie_string:
+            cmd.extend(['-H', f'Cookie: {self.cookie_string}'])
+
+        for hk, hv in self.headers.items():
+            if str(hk).lower() == 'cookie':
+                continue
+            cmd.extend(['-H', f'{hk}: {hv}'])
+
+        cmd.append(url)
         
         try:
             result = subprocess.run(cmd, capture_output=True, text=True, encoding='utf-8', errors='ignore', creationflags=creationflags)
@@ -272,7 +337,8 @@ class CurlParser:
         except: return "0.00"
 
     def save_to_csv(self, items, filename, selected_columns=None):
-        if not items: return
+        if items is None:
+            items = []
         
         full_header_map = {
             'article': 'Артикул',
@@ -298,7 +364,7 @@ class CurlParser:
             writer = csv.DictWriter(f, fieldnames=fieldnames, delimiter=';', extrasaction='ignore')
             writer.writerow(header_row)
             writer.writerows(items)
-        self.log(f"ГОТОВО: Сохранено в {filename}")
+        self.log(f"ГОТОВО: Сохранено в {filename} (rows: {len(items)})")
 
     def run(self, selected_categories=None, max_products_per_cat=None, selected_columns=None, use_deep_parsing=True, parallel=True):
         # selected_categories может быть списком ID или списком объектов {'id': ..., 'path': [...]}
@@ -319,6 +385,7 @@ class CurlParser:
         self.log(f"{'='*70}\n")
         
         all_results = []
+        products_collected = 0
         
         def process_one_cat(cat_info):
             cat_id = cat_info.get('id')
@@ -350,9 +417,19 @@ class CurlParser:
                     self.log("\n[STOP] Parsing interrupted by user.")
                     executor.shutdown(wait=False, cancel_futures=True)
                     break
-                all_results.extend(future.result())
+                category_items = future.result()
+                all_results.extend(category_items)
+                products_collected += len(category_items)
                 completed += 1
-                if self.progress_callback: self.progress_callback(completed / len(cats_to_parse))
+                if self.progress_callback:
+                    self.progress_callback(
+                        {
+                            'progress_percent': completed / len(cats_to_parse),
+                            'categories_done': completed,
+                            'categories_total': len(cats_to_parse),
+                            'products_collected': products_collected,
+                        }
+                    )
         
         # --- ФИНАЛЬНАЯ ДЕДУПЛИКАЦИЯ ПО АРТИКУЛУ ---
         total_before = len(all_results)

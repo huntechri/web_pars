@@ -6,6 +6,7 @@ from .config import settings
 from .database import Base, SessionLocal, engine
 from .models import User
 from .routers import auth, categories, parser
+from .services.storage import is_object_storage_enabled
 
 
 app = FastAPI(title="Petrovich Parser API", version="0.1.0")
@@ -39,7 +40,11 @@ def on_startup() -> None:
 
 @app.get("/health")
 def health():
-    return {"status": "ok"}
+    return {
+        "status": "ok",
+        "storage_enabled": is_object_storage_enabled(),
+        "storage_bucket": settings.storage_bucket,
+    }
 
 
 app.include_router(auth.router)

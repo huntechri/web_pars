@@ -1,4 +1,5 @@
 from pathlib import Path
+from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -10,6 +11,14 @@ class Settings(BaseSettings):
     admin_username: str = "admin"
     admin_password: str = "admin"
     frontend_origin: str = "http://localhost:3000"
+    parser_cookies: str | dict[str, str] = Field(default_factory=dict)
+    parser_headers: str | dict[str, str] = Field(default_factory=dict)
+    storage_bucket: str | None = None
+    storage_endpoint_url: str | None = None
+    storage_access_key_id: str | None = None
+    storage_secret_access_key: str | None = None
+    storage_region: str = "auto"
+    storage_presign_expire_seconds: int = 3600
 
     model_config = SettingsConfigDict(
         env_file=str(Path(__file__).resolve().parents[1] / ".env"),
