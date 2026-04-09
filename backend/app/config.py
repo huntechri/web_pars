@@ -1,3 +1,4 @@
+import os
 from pathlib import Path
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -27,6 +28,14 @@ class Settings(BaseSettings):
 
 
 settings = Settings()
+
+_DEFAULT_LOCAL_DATABASE_URL = "postgresql+psycopg2://postgres:postgres@localhost:5432/petrovich"
+if os.getenv("RENDER") and settings.database_url == _DEFAULT_LOCAL_DATABASE_URL:
+    raise RuntimeError(
+        "APP_DATABASE_URL is not set in Render environment. "
+        "Current value points to localhost, so API cannot reach PostgreSQL. "
+        "Set APP_DATABASE_URL to your Render Postgres connection string."
+    )
 
 if settings.database_url.startswith("postgres://"):
     settings.database_url = settings.database_url.replace("postgres://", "postgresql+psycopg2://", 1)

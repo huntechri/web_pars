@@ -1,3 +1,10 @@
+databases:
+  - name: petrovich-parser-db
+    plan: starter
+    region: frankfurt
+    databaseName: petrovich
+    user: petrovich
+
 services:
   - type: web
     name: petrovich-parser-api
@@ -7,8 +14,12 @@ services:
     buildCommand: pip install -r backend/requirements.txt
     startCommand: python -m uvicorn backend.app.main:app --host 0.0.0.0 --port $PORT
     envVars:
+      - key: PYTHON_VERSION
+        value: 3.11.9
       - key: APP_DATABASE_URL
-        sync: false
+        fromDatabase:
+          name: petrovich-parser-db
+          property: connectionString
       - key: APP_JWT_SECRET
         sync: false
       - key: APP_JWT_ALGORITHM
@@ -37,3 +48,17 @@ services:
         value: auto
       - key: APP_STORAGE_PRESIGN_EXPIRE_SECONDS
         value: "3600"
+
+  - type: web
+    name: petrovich-parser-frontend
+    runtime: node
+    plan: starter
+    region: frankfurt
+    rootDir: frontend
+    buildCommand: npm ci && npm run build
+    startCommand: npm run start -- -H 0.0.0.0 -p $PORT
+    envVars:
+      - key: NODE_VERSION
+        value: "20.19.0"
+      - key: NEXT_PUBLIC_API_BASE_URL
+        sync: false
