@@ -14,6 +14,9 @@ class Settings(BaseSettings):
     frontend_origin: str = "http://localhost:3000"
     parser_cookies: str | dict[str, str] = Field(default_factory=dict)
     parser_headers: str | dict[str, str] = Field(default_factory=dict)
+    parser_max_category_workers: int = 3
+    parser_retry_base_delay_seconds: float = 0.35
+    parser_rate_limit_wait_cap_seconds: int = 15
     storage_bucket: str | None = None
     storage_endpoint_url: str | None = None
     storage_access_key_id: str | None = None
