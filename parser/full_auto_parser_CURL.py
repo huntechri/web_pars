@@ -56,6 +56,7 @@ class CurlParser:
         max_category_workers=3,
         retry_base_delay_seconds=0.35,
         rate_limit_wait_cap_seconds=15,
+        request_timeout_seconds=20,
     ):
         self.log_callback = log_callback
         self.progress_callback = progress_callback
@@ -64,6 +65,7 @@ class CurlParser:
         self.max_category_workers = max(1, int(max_category_workers or 1))
         self.retry_base_delay_seconds = max(0.1, float(retry_base_delay_seconds or 0.35))
         self.rate_limit_wait_cap_seconds = max(1, int(rate_limit_wait_cap_seconds or 15))
+        self.request_timeout_seconds = max(5, int(request_timeout_seconds or 20))
         
         # Загрузка настроек
         self.cookies_raw, self.headers_from_cook = self.load_cookies_and_headers(
@@ -209,7 +211,7 @@ class CurlParser:
         # 1. Пробуем через requests (уже с сессией и куками)
         for attempt in range(retry):
             try:
-                resp = self.session.get(url, timeout=15)
+                resp = self.session.get(url, timeout=self.request_timeout_seconds)
                 if resp.status_code == 200:
                     return resp.json()
                 # Логируем статус, чтобы понять причину сбоя
@@ -230,16 +232,20 @@ class CurlParser:
             if attempt + 1 < retry:
                 time.sleep(self.retry_base_delay_seconds * (attempt + 1))
         
-        # 2. Если упало - пробуем старый добрый curl.exe
+        # 2. Если упало - пробуем системный curl (если установлен)
         startupinfo = None
         creationflags = 0
         if sys.platform == 'win32':
             creationflags = subprocess.CREATE_NO_WINDOW
 
-        curl_bin = 'curl.exe' if sys.platform == 'win32' else 'curl'
+        curl_candidates = ['curl.exe', 'curl'] if sys.platform == 'win32' else ['curl']
+        curl_bin = next((c for c in curl_candidates if shutil.which(c)), None)
+        if not curl_bin:
+            self.log("      [CURL SKIP] curl binary not found in PATH; skipping subprocess fallback")
+            return None
         cmd = [
             curl_bin, '--noproxy', '*', '-s', '-L',
-            '--connect-timeout', '15',
+            '--connect-timeout', str(self.request_timeout_seconds),
         ]
 
         if self.cookie_string:

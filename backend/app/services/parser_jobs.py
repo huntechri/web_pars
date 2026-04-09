@@ -120,6 +120,7 @@ def _run_parser_job(job_id: str, project_root: Path) -> None:
             max_category_workers=settings.parser_max_category_workers,
             retry_base_delay_seconds=settings.parser_retry_base_delay_seconds,
             rate_limit_wait_cap_seconds=settings.parser_rate_limit_wait_cap_seconds,
+            request_timeout_seconds=settings.parser_request_timeout_seconds,
         )
 
         # Важно: ядро парсера использует файлы из CWD (Cook/categories_config.txt)
