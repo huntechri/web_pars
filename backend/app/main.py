@@ -6,6 +6,8 @@ from .config import settings
 from .database import Base, SessionLocal, engine
 from .models import User
 from .routers import auth, categories, parser
+from .services.db_migrations import run_sql_migrations
+from .services.parser_jobs import recover_stale_running_jobs
 from .services.storage import is_object_storage_enabled
 
 
@@ -13,8 +15,8 @@ app = FastAPI(title="Petrovich Parser API", version="0.1.0")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[settings.frontend_origin],
-    allow_credentials=True,
+    allow_origins=["*"],
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -22,7 +24,9 @@ app.add_middleware(
 
 @app.on_event("startup")
 def on_startup() -> None:
+    run_sql_migrations(engine)
     Base.metadata.create_all(bind=engine)
+    recover_stale_running_jobs()
 
     db = SessionLocal()
     try:

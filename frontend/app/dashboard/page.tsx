@@ -3,6 +3,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import { apiFetch, getApiBaseUrl } from "../../lib/api";
+import ParserSidebar from "../../components/ParserSidebar";
 
 type TreeNode = {
   code?: string | number;
@@ -34,21 +35,21 @@ function collectSelectedNodes(
 ): Array<{ id: string; path: string[] }> {
   const result: Array<{ id: string; path: string[] }> = [];
 
-  const walk = (node: TreeNode, path: string[], hasSelectedAncestor: boolean) => {
+  const walk = (node: TreeNode, path: string[]) => {
     const nextPath = [...path, node.title];
     const isSelected = !!(node.code && selectedCodes.has(String(node.code)));
 
-    // Если выбран родитель, не отправляем выбранных потомков отдельно:
-    // это убирает дублирующий парсинг parent + child, сохраняя поведение UI.
-    if (isSelected && !hasSelectedAncestor) {
+    // В payload отправляем КАЖДУЮ выбранную категорию.
+    // Некоторые разделы API возвращают только "прямые" товары категории,
+    // поэтому исключать потомков нельзя — иначе можно получить только первую страницу (50).
+    if (isSelected) {
       result.push({ id: String(node.code), path: nextPath });
     }
 
-    const nextHasSelectedAncestor = hasSelectedAncestor || isSelected;
-    (node.children || []).forEach((child) => walk(child, nextPath, nextHasSelectedAncestor));
+    (node.children || []).forEach((child) => walk(child, nextPath));
   };
 
-  Object.values(groups).forEach((arr) => arr.forEach((n) => walk(n, parentPath, false)));
+  Object.values(groups).forEach((arr) => arr.forEach((n) => walk(n, parentPath)));
   return result;
 }
 
@@ -303,18 +304,14 @@ export default function DashboardPage() {
   }
 
   return (
-    <main className="container">
-      <div className="card">
+    <main className="app-shell">
+      <ParserSidebar />
+
+      <section className="app-content app-content-wide dashboard-content">
+      <div className="card dashboard-main-card">
         <div className="row space-between">
           <h1 className="m-0">Парсер Петрович (web)</h1>
-          <button
-            onClick={() => {
-              localStorage.removeItem("token");
-              router.push("/login");
-            }}
-          >
-            Выйти
-          </button>
+          <span />
         </div>
 
         <p>Выбрано категорий: {selectedCount}</p>
@@ -333,7 +330,7 @@ export default function DashboardPage() {
           {loading ? "Запуск..." : "Запустить"}
         </button>
 
-        <div className="mt-20">
+        <div className="mt-20 dashboard-status">
           <h3>Статус</h3>
           <p>Job ID: {jobId || "—"}</p>
           <p>Состояние: {jobStatus || "—"}</p>
@@ -359,28 +356,40 @@ export default function DashboardPage() {
             </div>
           ) : null}
           {jobError ? <p className="error">{jobError}</p> : null}
-          <button onClick={downloadCsv} disabled={jobStatus !== "done"}>
-            Скачать CSV
-          </button>
+          <div className="row dashboard-actions">
+            <button onClick={downloadCsv} disabled={jobStatus !== "done"}>
+              Скачать CSV
+            </button>
+            <button
+              onClick={() => router.push(`/results?jobId=${encodeURIComponent(jobId)}`)}
+              disabled={jobStatus !== "done" || !jobId}
+            >
+              Открыть таблицу
+            </button>
+          </div>
         </div>
       </div>
 
-      <div className="card mt-16">
+      <div className="card mt-16 dashboard-categories-card">
         <div className="row space-between">
           <h2 className="m-0">Категории</h2>
           <button onClick={refreshCategories} disabled={refreshingCategories || loading}>
             {refreshingCategories ? "Обновляем..." : "Обновить категории"}
           </button>
         </div>
-        {Object.entries(categories).map(([group, nodes]) => (
-          <section key={group} className="section-gap">
-            <h3>{group}</h3>
-            {nodes.map((node) => (
-              <TreeItem key={`${node.code || node.title}-${group}`} node={node} selected={selected} toggle={toggleNode} />
-            ))}
-          </section>
-        ))}
+
+        <div className="dashboard-categories-scroll">
+          {Object.entries(categories).map(([group, nodes]) => (
+            <section key={group} className="section-gap">
+              <h3>{group}</h3>
+              {nodes.map((node) => (
+                <TreeItem key={`${node.code || node.title}-${group}`} node={node} selected={selected} toggle={toggleNode} />
+              ))}
+            </section>
+          ))}
+        </div>
       </div>
+      </section>
     </main>
   );
 }

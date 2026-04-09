@@ -38,6 +38,31 @@ class ParseJobResponse(BaseModel):
     updated_at: datetime
 
 
+class ParseResultRowResponse(BaseModel):
+    id: int
+    article: str | None = None
+    name: str = ""
+    unit: str | None = None
+    price: str | None = None
+    brand: str | None = None
+    weight: str | None = None
+    level1: str | None = None
+    level2: str | None = None
+    level3: str | None = None
+    level4: str | None = None
+    image: str | None = None
+    url: str | None = None
+    supplier: str | None = None
+
+
+class ParseJobResultsResponse(BaseModel):
+    job_id: str
+    total: int
+    limit: int
+    offset: int
+    items: list[ParseResultRowResponse] = Field(default_factory=list)
+
+
 class ParseJobProgressResponse(BaseModel):
     status: str
     progress_percent: int = 0

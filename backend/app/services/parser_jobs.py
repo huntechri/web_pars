@@ -10,13 +10,42 @@ from parser.full_auto_parser_CURL import CurlParser
 
 from ..config import settings
 from ..database import SessionLocal
-from ..models import ParseJob
+from ..models import ParseJob, ParseResult
 from .storage import is_object_storage_enabled, upload_csv
 
 
 _lock = threading.Lock()
 _progress_lock = threading.Lock()
 _job_progress: dict[str, dict[str, Any]] = {}
+
+
+def _save_job_results(db: Session, job_id: str, parsed_items: list[dict[str, Any]]) -> None:
+    db.query(ParseResult).filter(ParseResult.job_id == job_id).delete()
+    if not parsed_items:
+        return
+
+    rows = []
+    for item in parsed_items:
+        rows.append(
+            ParseResult(
+                job_id=job_id,
+                article=item.get("article") or None,
+                name=item.get("name") or "",
+                unit=item.get("unit") or None,
+                price=item.get("price") or None,
+                brand=item.get("brand") or None,
+                weight=item.get("weight") or None,
+                level1=item.get("level1") or None,
+                level2=item.get("level2") or None,
+                level3=item.get("level3") or None,
+                level4=item.get("level4") or None,
+                image=item.get("image") or None,
+                url=item.get("url") or None,
+                supplier=item.get("supplier") or None,
+            )
+        )
+
+    db.bulk_save_objects(rows)
 
 
 def _set_job_progress(job_id: str, payload: dict[str, Any]) -> None:
@@ -29,6 +58,25 @@ def _set_job_progress(job_id: str, payload: dict[str, Any]) -> None:
 def get_job_progress(job_id: str) -> dict[str, Any]:
     with _progress_lock:
         return dict(_job_progress.get(job_id, {}))
+
+
+def recover_stale_running_jobs() -> int:
+    """Переводит зависшие после рестарта сервера job из running в failed."""
+    db: Session = SessionLocal()
+    try:
+        stale_jobs = db.query(ParseJob).filter(ParseJob.status == "running").all()
+        if not stale_jobs:
+            return 0
+
+        for job in stale_jobs:
+            job.status = "failed"
+            if not job.error:
+                job.error = "Job interrupted: server restarted before completion"
+
+        db.commit()
+        return len(stale_jobs)
+    finally:
+        db.close()
 
 
 def _run_parser_job(job_id: str, project_root: Path) -> None:
@@ -76,11 +124,14 @@ def _run_parser_job(job_id: str, project_root: Path) -> None:
         prev_cwd = os.getcwd()
         try:
             os.chdir(project_root)
-            output_file = parser.run(
+            output_file, parsed_items = parser.run(
                 selected_categories=job.selected_categories,
                 max_products_per_cat=job.max_products,
+                return_items=True,
             )
             local_output = project_root / output_file
+
+            _save_job_results(db, job.id, parsed_items)
 
             if is_object_storage_enabled():
                 dt = job.created_at or datetime.utcnow()

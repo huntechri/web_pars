@@ -9,8 +9,8 @@ from sqlalchemy.orm import Session
 from ..config import PROJECT_ROOT
 from ..database import get_db
 from ..deps import get_current_user
-from ..models import ParseJob, User
-from ..schemas import ParseJobProgressResponse, ParseJobResponse, StartParseRequest
+from ..models import ParseJob, ParseResult, User
+from ..schemas import ParseJobProgressResponse, ParseJobResponse, ParseJobResultsResponse, ParseResultRowResponse, StartParseRequest
 from ..services.parser_jobs import get_job_progress, start_job
 from ..services.storage import get_download_url, is_object_storage_enabled
 
@@ -33,6 +33,7 @@ def run_parser(
         selected_categories=payload.selected_categories,
         max_products=payload.max_products_per_cat,
     )
+
     db.add(job)
     db.commit()
     db.refresh(job)
@@ -49,6 +50,29 @@ def run_parser(
     )
 
 
+@router.get("/jobs", response_model=list[ParseJobResponse])
+def list_jobs(db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    jobs = (
+        db.query(ParseJob)
+        .filter(ParseJob.user_id == current_user.id)
+        .order_by(ParseJob.created_at.desc())
+        .limit(100)
+        .all()
+    )
+
+    return [
+        ParseJobResponse(
+            id=job.id,
+            status=job.status,
+            output_file=job.output_file,
+            error=job.error,
+            created_at=job.created_at,
+            updated_at=job.updated_at,
+        )
+        for job in jobs
+    ]
+
+
 @router.get("/jobs/{job_id}", response_model=ParseJobResponse)
 def get_job(job_id: str, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     job = db.query(ParseJob).filter(ParseJob.id == job_id, ParseJob.user_id == current_user.id).first()
@@ -62,6 +86,56 @@ def get_job(job_id: str, db: Session = Depends(get_db), current_user: User = Dep
         error=job.error,
         created_at=job.created_at,
         updated_at=job.updated_at,
+    )
+
+
+@router.get("/jobs/{job_id}/results", response_model=ParseJobResultsResponse)
+def get_job_results(
+    job_id: str,
+    limit: int = 50,
+    offset: int = 0,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    if limit < 1:
+        limit = 1
+    if limit > 500:
+        limit = 500
+    if offset < 0:
+        offset = 0
+
+    job = db.query(ParseJob).filter(ParseJob.id == job_id, ParseJob.user_id == current_user.id).first()
+    if not job:
+        raise HTTPException(status_code=404, detail="Задача не найдена")
+
+    base_query = db.query(ParseResult).filter(ParseResult.job_id == job_id)
+    total = base_query.count()
+    rows = base_query.order_by(ParseResult.id.asc()).offset(offset).limit(limit).all()
+
+    return ParseJobResultsResponse(
+        job_id=job_id,
+        total=total,
+        limit=limit,
+        offset=offset,
+        items=[
+            ParseResultRowResponse(
+                id=row.id,
+                article=row.article,
+                name=row.name,
+                unit=row.unit,
+                price=row.price,
+                brand=row.brand,
+                weight=row.weight,
+                level1=row.level1,
+                level2=row.level2,
+                level3=row.level3,
+                level4=row.level4,
+                image=row.image,
+                url=row.url,
+                supplier=row.supplier,
+            )
+            for row in rows
+        ],
     )
 
 

@@ -12,9 +12,16 @@ import io
 import os
 import ast
 import shutil
-import requests
+import threading
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
+
+try:
+    from curl_cffi.requests import Session as CffiSession
+    _CFFI_AVAILABLE = True
+except ImportError:
+    import requests
+    _CFFI_AVAILABLE = False
 
 
 DEFAULT_USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36'
@@ -69,15 +76,24 @@ class CurlParser:
         if 'User-Agent' not in self.headers:
             self.headers['User-Agent'] = self.user_agent
         
-        # Подготовка сессии requests (для ТУРБО режима)
-        self.session = requests.Session()
-        self.session.headers.update(self.headers)
-        for k, v in self.cookies_raw.items():
-            self.session.cookies.set(k, v)
-        
+        # Подготовка сессии (curl_cffi имитирует Chrome TLS, иначе fallback на requests)
+        if _CFFI_AVAILABLE:
+            self.session = CffiSession(impersonate='chrome131')
+            self.session.headers.update(self.headers)
+            for k, v in self.cookies_raw.items():
+                self.session.cookies.set(k, v)
+            self.log("INFO: Using curl_cffi (Chrome TLS impersonation)")
+        else:
+            import requests as _requests
+            self.session = _requests.Session()
+            self.session.headers.update(self.headers)
+            for k, v in self.cookies_raw.items():
+                self.session.cookies.set(k, v)
+            self.log("WARN: curl_cffi not available, using requests (may hit 403)")
+
         self.categories = self.load_categories()
         self.cookie_string = '; '.join([f"{k}={v}" for k, v in self.cookies_raw.items()])
-        
+
         self.log(f"DONE: Loaded {len(self.cookies_raw)} cookies")
         self.log(f"DONE: Loaded {len(self.categories)} categories")
         self.log(f"INFO: TURBO MODE (Parallel Pagination + Requests Session) ENABLED\n")
@@ -184,8 +200,19 @@ class CurlParser:
                 resp = self.session.get(url, timeout=15)
                 if resp.status_code == 200:
                     return resp.json()
-            except Exception:
-                pass
+                # Логируем статус, чтобы понять причину сбоя
+                self.log(f"      [HTTP] status={resp.status_code} attempt={attempt+1}/{retry} url={url[:80]}")
+                if resp.status_code == 429:
+                    # Уважаем Retry-After от сервера (или ждём 10 с по умолчанию)
+                    retry_after = int(resp.headers.get('Retry-After', 10))
+                    retry_after = min(retry_after, 60)  # не ждём больше минуты
+                    self.log(f"      [RATE LIMIT] Waiting {retry_after}s before retry...")
+                    time.sleep(retry_after)
+                    continue
+                if resp.status_code in (403, 401):
+                    self.log(f"      [AUTH] Cookies/session may be expired (status={resp.status_code})")
+            except Exception as exc:
+                self.log(f"      [ERR] requests exception attempt={attempt+1}/{retry}: {exc}")
             time.sleep(1)
         
         # 2. Если упало - пробуем старый добрый curl.exe
@@ -213,8 +240,13 @@ class CurlParser:
             result = subprocess.run(cmd, capture_output=True, text=True, encoding='utf-8', errors='ignore', creationflags=creationflags)
             if result.returncode == 0 and result.stdout.strip():
                 return json.loads(result.stdout)
-        except:
-            pass
+            if result.returncode != 0:
+                self.log(f"      [CURL ERR] returncode={result.returncode} stderr={result.stderr.strip()[:120]}")
+            elif result.stdout.strip():
+                # curl вернул 0, но JSON невалидный — логируем начало ответа
+                self.log(f"      [CURL JSON ERR] response_start={result.stdout.strip()[:120]}")
+        except Exception as exc:
+            self.log(f"      [CURL EXC] {exc}")
             
         return None
 
@@ -225,7 +257,7 @@ class CurlParser:
             return data['data'].get('section', {})
         return None
 
-    def parse_category_products(self, section_code, category_path, max_products=None):
+    def parse_category_products(self, section_code, category_path, max_products=None, progress_hook=None):
         """Парсинг товаров из конкретной категории с ПАРАЛЛЕЛЬНОЙ ПАГИНАЦИЕЙ"""
         all_products = []
         limit = 50
@@ -242,40 +274,105 @@ class CurlParser:
         page_products = first_data.get('data', {}).get('products', []) or []
         
         self.log(f"    [INFO] Total products: {total_count}")
-        all_products.extend(self._process_raw_list(page_products, category_path))
+        first_processed = self._process_raw_list(page_products, category_path)
+        all_products.extend(first_processed)
+        if progress_hook and first_processed:
+            progress_hook(len(first_processed))
         
-        if total_count <= limit or (max_products and len(all_products) >= max_products):
+        if max_products and len(all_products) >= max_products:
             return all_products[:max_products] if max_products else all_products
 
-        # Шаг 2: Вычисляем оставшиеся страницы
-        target_total = total_count
-        if max_products: target_total = min(total_count, max_products)
-        
-        offsets = range(limit, target_total, limit)
-        total_pages = len(offsets) + 1
-        
-        self.log(f"    [TURBO] Fetching {len(offsets)} pages in parallel...")
-        
-        # Шаг 3: Параллельная загрузка страниц (8 потоков оптимально)
-        with ThreadPoolExecutor(max_workers=8) as executor:
-            futures = []
-            for off in offsets:
-                url = f"{self.base_url}/{section_code}/products?limit={limit}&offset={off}&sort=popularity_desc&city_code=msk&client_id=pet_site"
-                futures.append(executor.submit(self.fetch_api, url))
-            
-            done = 1
-            for future in as_completed(futures):
-                if self.stop_requested: 
-                    executor.shutdown(wait=False, cancel_futures=True)
+        # В некоторых разделах API отдает некорректный `total` (например 0),
+        # поэтому ориентируемся на фактический размер первой страницы.
+        # Если первая страница неполная (< limit), значит дальше страниц нет.
+        if len(page_products) < limit:
+            return all_products[:max_products] if max_products else all_products
+
+        # Шаг 2: Надежная последовательная пагинация.
+        # Важно: не доверяем total безусловно, т.к. API иногда возвращает заниженное значение.
+        self.log("    [SAFE] Fetching next pages until empty page...")
+
+        off = limit
+        page_idx = 2
+        max_pages_guard = 1000
+        failed_offsets = []
+
+        while page_idx <= max_pages_guard:
+            if self.stop_requested:
+                break
+            if max_products and len(all_products) >= max_products:
+                break
+
+            url = f"{self.base_url}/{section_code}/products?limit={limit}&offset={off}&sort=popularity_desc&city_code=msk&client_id=pet_site"
+            p_data = None
+            for attempt in range(1, 6):
+                p_data = self.fetch_api(url, retry=1)
+                if p_data and p_data.get('data') is not None:
                     break
-                p_data = future.result()
-                done += 1
-                if p_data:
-                    raw_list = p_data.get('data', {}).get('products', []) or []
-                    all_products.extend(self._process_raw_list(raw_list, category_path))
-                
-                if done % 5 == 0 or done == total_pages:
-                    self.log(f"    - Progress: {done}/{total_pages} pages")
+                time.sleep(min(3.0, 0.5 * attempt))
+
+            if not p_data or p_data.get('data') is None:
+                self.log(f"    [WARN] Page fetch failed: offset={off} (все 5 попыток исчерпаны)")
+                failed_offsets.append(off)
+                # В первом проходе не обрываем весь парсинг из-за одной проблемной страницы.
+                off += limit
+                page_idx += 1
+                continue
+
+            raw_list = p_data.get('data', {}).get('products', []) or []
+            if not raw_list:
+                self.log(f"    [INFO] Reached last page at offset={off}")
+                break
+
+            processed = self._process_raw_list(raw_list, category_path)
+            all_products.extend(processed)
+            if progress_hook and processed:
+                progress_hook(len(processed))
+
+            if page_idx % 5 == 0:
+                self.log(f"    - Progress: page={page_idx}, collected={len(all_products)}")
+
+            # Страница неполная — это хвост, дальше данных нет. Не тратим запрос на пустую страницу.
+            if len(raw_list) < limit:
+                self.log(f"    [INFO] Partial page ({len(raw_list)}/{limit}) at offset={off} — pagination complete")
+                break
+
+            # Если API заявил total и мы его уже перекрыли — тоже стоп.
+            if total_count > 0 and len(all_products) >= total_count:
+                self.log(f"    [INFO] Collected {len(all_products)}/{total_count} — reached total, stopping")
+                break
+
+            off += limit
+            page_idx += 1
+
+        # Шаг 3: Добор упавших страниц с усиленными ретраями.
+        if failed_offsets and not self.stop_requested:
+            self.log(f"    [RETRY] Re-fetching failed pages: {len(failed_offsets)}")
+            unrecovered_offsets = []
+            for failed_off in sorted(set(failed_offsets)):
+                if self.stop_requested:
+                    break
+                if max_products and len(all_products) >= max_products:
+                    break
+
+                retry_url = f"{self.base_url}/{section_code}/products?limit={limit}&offset={failed_off}&sort=popularity_desc&city_code=msk&client_id=pet_site"
+                retry_data = self.fetch_api(retry_url, retry=8)
+                if not retry_data or retry_data.get('data') is None:
+                    unrecovered_offsets.append(failed_off)
+                    continue
+
+                retry_raw = retry_data.get('data', {}).get('products', []) or []
+                if retry_raw:
+                    processed = self._process_raw_list(retry_raw, category_path)
+                    all_products.extend(processed)
+                    if progress_hook and processed:
+                        progress_hook(len(processed))
+
+            if unrecovered_offsets:
+                preview = ", ".join(str(x) for x in unrecovered_offsets[:10])
+                if len(unrecovered_offsets) > 10:
+                    preview += ", ..."
+                raise RuntimeError(f"Failed to fetch category pages (offsets): {preview}")
 
         return all_products[:max_products] if max_products else all_products
 
@@ -366,7 +463,7 @@ class CurlParser:
             writer.writerows(items)
         self.log(f"ГОТОВО: Сохранено в {filename} (rows: {len(items)})")
 
-    def run(self, selected_categories=None, max_products_per_cat=None, selected_columns=None, use_deep_parsing=True, parallel=True):
+    def run(self, selected_categories=None, max_products_per_cat=None, selected_columns=None, use_deep_parsing=True, parallel=True, return_items=False):
         # selected_categories может быть списком ID или списком объектов {'id': ..., 'path': [...]}
         input_cats = selected_categories if selected_categories else [c['code'] for c in self.categories]
         
@@ -386,6 +483,25 @@ class CurlParser:
         
         all_results = []
         products_collected = 0
+        completed = 0
+        progress_state_lock = threading.Lock()
+
+        def emit_progress(products_delta=0, completed_delta=0):
+            nonlocal products_collected, completed
+            with progress_state_lock:
+                products_collected += int(products_delta)
+                completed += int(completed_delta)
+                if self.progress_callback:
+                    self.progress_callback(
+                        {
+                            'progress_percent': (completed / len(cats_to_parse)) if cats_to_parse else 1,
+                            'categories_done': completed,
+                            'categories_total': len(cats_to_parse),
+                            'products_collected': products_collected,
+                        }
+                    )
+
+        emit_progress(products_delta=0, completed_delta=0)
         
         def process_one_cat(cat_info):
             cat_id = cat_info.get('id')
@@ -403,7 +519,12 @@ class CurlParser:
                 self.log(f"\n[#] CATEGORY: {display_name} (ID: {cat_id})")
                 
                 # Запускаем парсинг товаров
-                return self.parse_category_products(cat_id, cat_path, max_products_per_cat)
+                return self.parse_category_products(
+                    cat_id,
+                    cat_path,
+                    max_products_per_cat,
+                    progress_hook=lambda added: emit_progress(products_delta=added, completed_delta=0),
+                )
             except Exception as e:
                 self.log(f"Error cat {cat_id}: {e}")
             return []
@@ -411,7 +532,6 @@ class CurlParser:
         # Глобальный параллелизм по категориям
         with ThreadPoolExecutor(max_workers=5) as executor:
             futures = [executor.submit(process_one_cat, cinfo) for cinfo in cats_to_parse]
-            completed = 0
             for future in as_completed(futures):
                 if self.stop_requested:
                     self.log("\n[STOP] Parsing interrupted by user.")
@@ -419,28 +539,33 @@ class CurlParser:
                     break
                 category_items = future.result()
                 all_results.extend(category_items)
-                products_collected += len(category_items)
-                completed += 1
-                if self.progress_callback:
-                    self.progress_callback(
-                        {
-                            'progress_percent': completed / len(cats_to_parse),
-                            'categories_done': completed,
-                            'categories_total': len(cats_to_parse),
-                            'products_collected': products_collected,
-                        }
-                    )
+                emit_progress(products_delta=0, completed_delta=1)
         
-        # --- ФИНАЛЬНАЯ ДЕДУПЛИКАЦИЯ ПО АРТИКУЛУ ---
+        # --- ФИНАЛЬНАЯ ДЕДУПЛИКАЦИЯ (БЕЗ ПОТЕРИ ВАЛИДНЫХ ПОЗИЦИЙ) ---
         total_before = len(all_results)
         unique_results = []
-        seen_articles = set()
+        seen_keys = set()
         
         for item in all_results:
-            art = item.get('article')
-            if art not in seen_articles:
+            # Приоритетно используем URL (наиболее стабильный и уникальный ключ товара).
+            # Фоллбэки нужны для редких кейсов, где URL/артикул отсутствуют.
+            key = (
+                str(item.get('url') or '').strip().lower()
+                or str(item.get('article') or '').strip().lower()
+                or '|'.join([
+                    str(item.get('name') or '').strip().lower(),
+                    str(item.get('price') or '').strip(),
+                    str(item.get('unit') or '').strip().lower(),
+                    str(item.get('level1') or '').strip().lower(),
+                    str(item.get('level2') or '').strip().lower(),
+                    str(item.get('level3') or '').strip().lower(),
+                    str(item.get('level4') or '').strip().lower(),
+                ])
+            )
+
+            if key not in seen_keys:
                 unique_results.append(item)
-                seen_articles.add(art)
+                seen_keys.add(key)
         
         all_results = unique_results
         total_after = len(all_results)
@@ -462,6 +587,8 @@ class CurlParser:
         file = f'petrovich_turbo_{ts}.csv'
         self.save_to_csv(all_results, file, selected_columns=selected_columns)
         self.log(f"\n[OK] TOTAL COLLECTED (UNIQUE): {len(all_results)}")
+        if return_items:
+            return file, all_results
         return file
 
 if __name__ == '__main__':

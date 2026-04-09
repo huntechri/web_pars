@@ -32,6 +32,11 @@ class ParseJob(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow)
 
     user: Mapped[User] = relationship("User", back_populates="jobs")
+    results: Mapped[list["ParseResult"]] = relationship(
+        "ParseResult",
+        back_populates="job",
+        cascade="all, delete-orphan",
+    )
 
 
 class Category(Base):
@@ -44,3 +49,26 @@ class Category(Base):
     level: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
     product_qty: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     updated_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+class ParseResult(Base):
+    __tablename__ = "parse_results"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    job_id: Mapped[str] = mapped_column(ForeignKey("parse_jobs.id", ondelete="CASCADE"), nullable=False, index=True)
+    article: Mapped[str | None] = mapped_column(String(128), nullable=True, index=True)
+    name: Mapped[str] = mapped_column(String(500), nullable=False, default="")
+    unit: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    price: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    brand: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    weight: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    level1: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    level2: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    level3: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    level4: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    image: Mapped[str | None] = mapped_column(Text, nullable=True)
+    url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    supplier: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=datetime.utcnow)
+
+    job: Mapped[ParseJob] = relationship("ParseJob", back_populates="results")
