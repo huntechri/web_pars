@@ -53,24 +53,45 @@ function collectSelectedNodes(
   return result;
 }
 
+type ExpandOverride = { value: boolean; v: number } | null;
+
 function TreeItem({
   node,
   selected,
   toggle,
-  level = 0
+  level = 0,
+  expandOverride
 }: {
   node: TreeNode;
   selected: Set<string>;
   toggle: (node: TreeNode, checked: boolean) => void;
   level?: number;
+  expandOverride?: ExpandOverride;
 }) {
+  const [expanded, setExpanded] = useState(true);
+
+  useEffect(() => {
+    if (expandOverride != null) setExpanded(expandOverride.value);
+  }, [expandOverride?.v]); // eslint-disable-line react-hooks/exhaustive-deps
   const code = node.code ? String(node.code) : undefined;
   const checked = code ? selected.has(code) : false;
   const levelClass = `tree-level-${Math.min(level, 6)}`;
+  const hasChildren = (node.children || []).length > 0;
 
   return (
     <div className={`tree-node ${levelClass}`}>
       <label className="row">
+        {hasChildren ? (
+          <button
+            type="button"
+            className="tree-collapse-btn"
+            onClick={(e) => { e.preventDefault(); setExpanded((v) => !v); }}
+          >
+            {expanded ? "▼" : "▶"}
+          </button>
+        ) : (
+          <span className="tree-collapse-spacer" />
+        )}
         {code ? (
           <input
             className="tree-indent"
@@ -84,10 +105,42 @@ function TreeItem({
         <span>{node.title}</span>
         <span className="category-qty">({node.product_qty ?? 0} шт.)</span>
       </label>
-      {(node.children || []).map((child) => (
-        <TreeItem key={`${child.code || child.title}-${level}`} node={child} selected={selected} toggle={toggle} level={level + 1} />
+      {expanded && (node.children || []).map((child) => (
+        <TreeItem key={`${child.code || child.title}-${level}`} node={child} selected={selected} toggle={toggle} level={level + 1} expandOverride={expandOverride} />
       ))}
     </div>
+  );
+}
+
+function CollapsibleSection({
+  group,
+  nodes,
+  selected,
+  toggleNode,
+  expandOverride
+}: {
+  group: string;
+  nodes: TreeNode[];
+  selected: Set<string>;
+  toggleNode: (node: TreeNode, checked: boolean) => void;
+  expandOverride?: ExpandOverride;
+}) {
+  const [expanded, setExpanded] = useState(true);
+
+  useEffect(() => {
+    if (expandOverride != null) setExpanded(expandOverride.value);
+  }, [expandOverride?.v]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  return (
+    <section className="section-gap">
+      <h3 className="section-header" onClick={() => setExpanded((v) => !v)}>
+        <span className="section-collapse-icon">{expanded ? "▼" : "▶"}</span>
+        {group}
+      </h3>
+      {expanded && nodes.map((node) => (
+        <TreeItem key={`${node.code || node.title}-${group}`} node={node} selected={selected} toggle={toggleNode} expandOverride={expandOverride} />
+      ))}
+    </section>
   );
 }
 
@@ -105,6 +158,25 @@ export default function DashboardPage() {
   const [jobProductsTotalEstimate, setJobProductsTotalEstimate] = useState<number>(0);
   const [loading, setLoading] = useState(false);
   const [refreshingCategories, setRefreshingCategories] = useState(false);
+  const [expandOverride, setExpandOverride] = useState<ExpandOverride>(null);
+
+  function setAllExpanded(value: boolean) {
+    setExpandOverride((prev) => ({ value, v: (prev?.v ?? 0) + 1 }));
+  }
+
+  function selectAll() {
+    const codes: string[] = [];
+    const walk = (node: TreeNode) => {
+      if (node.code) codes.push(String(node.code));
+      (node.children || []).forEach(walk);
+    };
+    Object.values(categories).forEach((nodes) => nodes.forEach(walk));
+    setSelected(new Set(codes));
+  }
+
+  function deselectAll() {
+    setSelected(new Set());
+  }
 
   useEffect(() => {
     const t = localStorage.getItem("token");
@@ -373,19 +445,20 @@ export default function DashboardPage() {
       <div className="card mt-16 dashboard-categories-card">
         <div className="row space-between">
           <h2 className="m-0">Категории</h2>
-          <button onClick={refreshCategories} disabled={refreshingCategories || loading}>
-            {refreshingCategories ? "Обновляем..." : "Обновить категории"}
-          </button>
+          <div className="row categories-toolbar">
+            <button className="btn-sm btn-secondary" onClick={() => setAllExpanded(true)}>Развернуть все</button>
+            <button className="btn-sm btn-secondary" onClick={() => setAllExpanded(false)}>Свернуть все</button>
+            <button className="btn-sm btn-secondary" onClick={selectAll}>Выделить все</button>
+            <button className="btn-sm btn-secondary" onClick={deselectAll}>Снять выделение</button>
+            <button onClick={refreshCategories} disabled={refreshingCategories || loading}>
+              {refreshingCategories ? "Обновляем..." : "Обновить категории"}
+            </button>
+          </div>
         </div>
 
         <div className="dashboard-categories-scroll">
           {Object.entries(categories).map(([group, nodes]) => (
-            <section key={group} className="section-gap">
-              <h3>{group}</h3>
-              {nodes.map((node) => (
-                <TreeItem key={`${node.code || node.title}-${group}`} node={node} selected={selected} toggle={toggleNode} />
-              ))}
-            </section>
+            <CollapsibleSection key={group} group={group} nodes={nodes} selected={selected} toggleNode={toggleNode} expandOverride={expandOverride} />
           ))}
         </div>
       </div>

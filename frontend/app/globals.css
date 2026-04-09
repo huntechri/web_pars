@@ -227,8 +227,71 @@ button:disabled {
   width: 16px;
 }
 
+.categories-toolbar {
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.btn-sm {
+  padding: 5px 10px;
+  font-size: 12px;
+}
+
+.btn-secondary {
+  background: #f3f4f6;
+  color: #374151;
+  border: 1px solid #d1d5db;
+}
+
+.btn-secondary:hover {
+  background: #e5e7eb;
+}
+
 .section-gap {
   margin-bottom: 14px;
+}
+
+.section-header {
+  margin: 0 0 6px;
+  cursor: pointer;
+  user-select: none;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.section-header:hover {
+  color: #2563eb;
+}
+
+.section-collapse-icon {
+  font-size: 10px;
+  color: #6b7280;
+  width: 12px;
+  display: inline-block;
+}
+
+.tree-collapse-btn {
+  background: none;
+  border: none;
+  color: #9ca3af;
+  padding: 0;
+  font-size: 9px;
+  cursor: pointer;
+  width: 14px;
+  min-width: 14px;
+  line-height: 1;
+}
+
+.tree-collapse-btn:hover {
+  color: #374151;
+  background: none;
+}
+
+.tree-collapse-spacer {
+  display: inline-block;
+  width: 14px;
+  min-width: 14px;
 }
 
 .category-qty {
