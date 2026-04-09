@@ -56,7 +56,7 @@ class CurlParser:
         max_category_workers=3,
         retry_base_delay_seconds=0.35,
         rate_limit_wait_cap_seconds=15,
-        request_timeout_seconds=20,
+        request_timeout_seconds=30,
     ):
         self.log_callback = log_callback
         self.progress_callback = progress_callback
@@ -110,6 +110,13 @@ class CurlParser:
 
         self.log(f"DONE: Loaded {len(self.cookies_raw)} cookies")
         self.log(f"DONE: Loaded {len(self.categories)} categories")
+        self.log(
+            "INFO: Parser tuning => "
+            f"workers={self.max_category_workers}, "
+            f"retry_base_delay={self.retry_base_delay_seconds}s, "
+            f"rate_limit_cap={self.rate_limit_wait_cap_seconds}s, "
+            f"request_timeout={self.request_timeout_seconds}s"
+        )
         self.log(f"INFO: TURBO MODE (Parallel Pagination + Requests Session) ENABLED\n")
 
     def log(self, message, end='\n'):

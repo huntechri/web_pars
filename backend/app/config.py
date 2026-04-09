@@ -17,7 +17,7 @@ class Settings(BaseSettings):
     parser_max_category_workers: int = 3
     parser_retry_base_delay_seconds: float = 0.35
     parser_rate_limit_wait_cap_seconds: int = 15
-    parser_request_timeout_seconds: int = 20
+    parser_request_timeout_seconds: int = 30
     storage_bucket: str | None = None
     storage_endpoint_url: str | None = None
     storage_access_key_id: str | None = None
