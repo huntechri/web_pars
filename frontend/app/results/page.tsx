@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { Suspense, useEffect, useMemo, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { apiFetch } from "../../lib/api";
 import ParserSidebar from "../../components/ParserSidebar";
@@ -42,6 +42,14 @@ type JobResultsResponse = {
 const PAGE_SIZE = 50;
 
 export default function ResultsPage() {
+  return (
+    <Suspense fallback={<main className="app-shell"><section className="app-content app-content-wide"><div className="card">Загрузка...</div></section></main>}>
+      <ResultsPageContent />
+    </Suspense>
+  );
+}
+
+function ResultsPageContent() {
   const router = useRouter();
   const searchParams = useSearchParams();
   const queryJobId = searchParams.get("jobId") || "";
