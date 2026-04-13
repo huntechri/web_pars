@@ -47,11 +47,25 @@ def ensure_config_exists(filename):
     return os.path.exists(filename)
 
 class CurlParser:
-    def __init__(self, log_callback=None, progress_callback=None, cookies_raw=None, headers_raw=None):
+    def __init__(
+        self,
+        log_callback=None,
+        progress_callback=None,
+        cookies_raw=None,
+        headers_raw=None,
+        max_category_workers=3,
+        retry_base_delay_seconds=0.35,
+        rate_limit_wait_cap_seconds=15,
+        request_timeout_seconds=30,
+    ):
         self.log_callback = log_callback
         self.progress_callback = progress_callback
         self.base_url = "https://api.petrovich.ru/catalog/v5/sections"
         self.stop_requested = False
+        self.max_category_workers = max(1, int(max_category_workers or 1))
+        self.retry_base_delay_seconds = max(0.1, float(retry_base_delay_seconds or 0.35))
+        self.rate_limit_wait_cap_seconds = max(1, int(rate_limit_wait_cap_seconds or 15))
+        self.request_timeout_seconds = max(5, int(request_timeout_seconds or 20))
         
         # Загрузка настроек
         self.cookies_raw, self.headers_from_cook = self.load_cookies_and_headers(
@@ -96,6 +110,13 @@ class CurlParser:
 
         self.log(f"DONE: Loaded {len(self.cookies_raw)} cookies")
         self.log(f"DONE: Loaded {len(self.categories)} categories")
+        self.log(
+            "INFO: Parser tuning => "
+            f"workers={self.max_category_workers}, "
+            f"retry_base_delay={self.retry_base_delay_seconds}s, "
+            f"rate_limit_cap={self.rate_limit_wait_cap_seconds}s, "
+            f"request_timeout={self.request_timeout_seconds}s"
+        )
         self.log(f"INFO: TURBO MODE (Parallel Pagination + Requests Session) ENABLED\n")
 
     def log(self, message, end='\n'):
@@ -197,7 +218,7 @@ class CurlParser:
         # 1. Пробуем через requests (уже с сессией и куками)
         for attempt in range(retry):
             try:
-                resp = self.session.get(url, timeout=15)
+                resp = self.session.get(url, timeout=self.request_timeout_seconds)
                 if resp.status_code == 200:
                     return resp.json()
                 # Логируем статус, чтобы понять причину сбоя
@@ -205,25 +226,33 @@ class CurlParser:
                 if resp.status_code == 429:
                     # Уважаем Retry-After от сервера (или ждём 10 с по умолчанию)
                     retry_after = int(resp.headers.get('Retry-After', 10))
-                    retry_after = min(retry_after, 60)  # не ждём больше минуты
+                    retry_after = min(retry_after, self.rate_limit_wait_cap_seconds)
                     self.log(f"      [RATE LIMIT] Waiting {retry_after}s before retry...")
                     time.sleep(retry_after)
                     continue
                 if resp.status_code in (403, 401):
                     self.log(f"      [AUTH] Cookies/session may be expired (status={resp.status_code})")
+                    # Нет смысла крутить повторные запросы при невалидной сессии.
+                    break
             except Exception as exc:
                 self.log(f"      [ERR] requests exception attempt={attempt+1}/{retry}: {exc}")
-            time.sleep(1)
+            if attempt + 1 < retry:
+                time.sleep(self.retry_base_delay_seconds * (attempt + 1))
         
-        # 2. Если упало - пробуем старый добрый curl.exe
+        # 2. Если упало - пробуем системный curl (если установлен)
         startupinfo = None
         creationflags = 0
         if sys.platform == 'win32':
             creationflags = subprocess.CREATE_NO_WINDOW
 
+        curl_candidates = ['curl.exe', 'curl'] if sys.platform == 'win32' else ['curl']
+        curl_bin = next((c for c in curl_candidates if shutil.which(c)), None)
+        if not curl_bin:
+            self.log("      [CURL SKIP] curl binary not found in PATH; skipping subprocess fallback")
+            return None
         cmd = [
-            'curl.exe', '--noproxy', '*', '-s', '-L',
-            '--connect-timeout', '15',
+            curl_bin, '--noproxy', '*', '-s', '-L',
+            '--connect-timeout', str(self.request_timeout_seconds),
         ]
 
         if self.cookie_string:
@@ -478,7 +507,7 @@ class CurlParser:
         self.log(f"ZAPUSK TURBO-PARSINGA PETROVICH")
         self.log(f"{'='*70}")
         self.log(f"Kategoriy: {len(cats_to_parse)}")
-        self.log(f"Metod: Parallel Pages (8 threads per cat + 5 threads global)")
+        self.log(f"Metod: Safe pagination + {self.max_category_workers} threads global")
         self.log(f"{'='*70}\n")
         
         all_results = []
@@ -529,8 +558,10 @@ class CurlParser:
                 self.log(f"Error cat {cat_id}: {e}")
             return []
 
-        # Глобальный параллелизм по категориям
-        with ThreadPoolExecutor(max_workers=5) as executor:
+        # Глобальный параллелизм по категориям.
+        # На публичных облаках (Render и т.п.) меньшее число воркеров обычно даёт
+        # лучшую итоговую скорость за счёт меньшего количества 429.
+        with ThreadPoolExecutor(max_workers=self.max_category_workers) as executor:
             futures = [executor.submit(process_one_cat, cinfo) for cinfo in cats_to_parse]
             for future in as_completed(futures):
                 if self.stop_requested:
