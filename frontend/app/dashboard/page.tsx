@@ -30,26 +30,46 @@ function collectDescendantCodes(node: TreeNode): string[] {
 
 function collectSelectedNodes(
   groups: GroupedTree,
-  selectedCodes: Set<string>,
-  parentPath: string[] = []
+  selectedCodes: Set<string>
 ): Array<{ id: string; path: string[] }> {
   const result: Array<{ id: string; path: string[] }> = [];
 
   const walk = (node: TreeNode, path: string[]) => {
     const nextPath = [...path, node.title];
-    const isSelected = !!(node.code && selectedCodes.has(String(node.code)));
+    const codeStr = node.code ? String(node.code) : "";
+    const isSelected = !!(codeStr && selectedCodes.has(codeStr));
 
-    // В payload отправляем КАЖДУЮ выбранную категорию.
-    // Некоторые разделы API возвращают только "прямые" товары категории,
-    // поэтому исключать потомков нельзя — иначе можно получить только первую страницу (50).
     if (isSelected) {
-      result.push({ id: String(node.code), path: nextPath });
+      const children = node.children || [];
+      const isLeaf = children.length === 0;
+
+      // Считаем сумму товаров во всех дочерних категориях (первого уровня)
+      const childrenTotalQty = children.reduce((sum, child) => sum + (child.product_qty || 0), 0);
+      const ownQty = node.product_qty || 0;
+
+      // Условие для добавления категории:
+      // 1. Это "лист" (нет детей)
+      // 2. ИЛИ у этой папки есть "прямые" товары, которые не входят в дочерние папки 
+      //    (проверка: ownQty > childrenTotalQty)
+      // 3. ИЛИ это папка, которую пользователь выбрал, но её детей НЕ выбрал
+      const someChildNotSelected = children.some(c => !selectedCodes.has(String(c.code)));
+
+      if (isLeaf || ownQty > childrenTotalQty || someChildNotSelected) {
+        result.push({ id: codeStr, path: nextPath });
+      }
     }
 
+    // В ЛЮБОМ СЛУЧАЕ продолжаем рекурсию в детей.
+    // Если ребенок тоже выбран — он добавится по своей логике.
+    // Лишние товары (дубликаты) будут отсечены бэкендом (seen_codes).
     (node.children || []).forEach((child) => walk(child, nextPath));
   };
 
-  Object.values(groups).forEach((arr) => arr.forEach((n) => walk(n, parentPath)));
+  Object.values(groups).forEach((arr) => arr.forEach((n) => walk(n, [])));
+  
+  // Дедупликация: если мы добавили и родителя, и ребенка, это может быть избыточно,
+  // но бэкенд все равно делает `seen_codes.add(code)`. 
+  // Главная цель — ГАРАНТИРОВАТЬ, что мы не пропустим ID, у которого есть товары.
   return result;
 }
 
@@ -241,12 +261,14 @@ export default function DashboardPage() {
   }, [categories]);
 
   const selectedProductsEstimate = useMemo(() => {
+    // Суммируем только листовые категории (те, что реально уйдут в парсер),
+    // иначе product_qty родителей суммируется повторно поверх дочерних.
     let total = 0;
-    selected.forEach((code) => {
-      total += categoryQtyByCode.get(code) || 0;
+    payloadCategories.forEach(({ id }) => {
+      total += categoryQtyByCode.get(id) || 0;
     });
     return total;
-  }, [selected, categoryQtyByCode]);
+  }, [payloadCategories, categoryQtyByCode]);
 
   const productsSpeedPerMinute = useMemo(() => {
     if (!jobProgress || !jobStartedAtMs) {
@@ -350,6 +372,16 @@ export default function DashboardPage() {
       .catch(() => setJobError("Не удалось скачать CSV"));
   }
 
+  async function cancelJob() {
+    if (!jobId || !token) return;
+    try {
+      await apiFetch(`/api/parser/jobs/${jobId}/cancel`, { method: "POST" }, token);
+      setJobStatus("cancelled");
+    } catch {
+      setJobError("Не удалось остановить задачу");
+    }
+  }
+
   async function refreshCategories() {
     if (!token) {
       return;
@@ -386,7 +418,7 @@ export default function DashboardPage() {
           <span />
         </div>
 
-        <p>Выбрано категорий: {selectedCount}</p>
+        <p>Выбрано категорий: {payloadCategories.length} (≈ {selectedProductsEstimate.toLocaleString("ru-RU")} шт.)</p>
 
         <div className="mb-12">
           <label htmlFor="max-products">Лимит товаров на категорию (опционально)</label>
@@ -437,6 +469,13 @@ export default function DashboardPage() {
               disabled={jobStatus !== "done" || !jobId}
             >
               Открыть таблицу
+            </button>
+            <button
+              className="btn-danger"
+              onClick={cancelJob}
+              disabled={!jobId || !["queued", "running"].includes(jobStatus)}
+            >
+              Остановить
             </button>
           </div>
         </div>

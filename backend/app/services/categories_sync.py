@@ -57,7 +57,12 @@ def _replace_categories_in_db(tree: dict[str, list[dict[str, Any]]]) -> int:
         db.close()
 
 
-def _fetch_full_category_tree(parser: CurlParser, category_id: str, level: int = 1, max_level: int = 3):
+def _fetch_full_category_tree(parser: CurlParser, category_id: str, level: int = 1, max_level: int = 6):
+    """
+    Рекурсивный обход дерева категорий. 
+    ВАЖНО: Метод внутри работает последовательно, чтобы избежать взрывного роста потоков при парсинге дерева.
+    """
+    print(f"    [FETCH] Level {level}: {category_id}")
     structure = parser.get_category_structure(category_id)
     if not structure:
         return None
@@ -71,25 +76,15 @@ def _fetch_full_category_tree(parser: CurlParser, category_id: str, level: int =
 
     children = structure.get("children", [])
     if children and level < max_level:
-        if len(children) > 3:
-            with ThreadPoolExecutor(max_workers=10) as executor:
-                child_codes = [c.get("code") for c in children if c.get("code")]
-                futures = [
-                    executor.submit(_fetch_full_category_tree, parser, str(code), level + 1, max_level)
-                    for code in child_codes
-                ]
-                for future in as_completed(futures):
-                    node = future.result()
-                    if node:
-                        result["children"].append(node)
-        else:
-            for child in children:
-                child_code = child.get("code")
-                if child_code:
-                    node = _fetch_full_category_tree(parser, str(child_code), level + 1, max_level)
-                    if node:
-                        result["children"].append(node)
+        # Для детей текущего узла идем последовательно (один за другим)
+        for child in children:
+            child_code = child.get("code")
+            if child_code:
+                node = _fetch_full_category_tree(parser, str(child_code), level + 1, max_level)
+                if node:
+                    result["children"].append(node)
     elif children:
+        # Если достигли лимита глубины — просто сохраняем базовую инфу без дальнейшего рекурсивного обхода
         for child in children:
             result["children"].append(
                 {
@@ -104,7 +99,11 @@ def _fetch_full_category_tree(parser: CurlParser, category_id: str, level: int =
     return result
 
 
-def rebuild_categories_tree(project_root: Path, max_level: int = 3):
+def rebuild_categories_tree(project_root: Path, max_level: int = 6):
+    """
+    Основной метод обновления дерева категорий.
+    Параллелизм ограничен только на верхнем уровне (по корневым группам Петровича).
+    """
     with _refresh_lock:
         parser = CurlParser(
             cookies_raw=settings.parser_cookies,
@@ -118,27 +117,37 @@ def rebuild_categories_tree(project_root: Path, max_level: int = 3):
 
         full_tree: dict[str, list[dict]] = {}
 
+        print(f"[REBUILD] Starting category tree rebuild (max_level={max_level})...")
         for parent_name, cats in sorted(categories_by_parent.items()):
+            print(f"[REBUILD] Processing group: {parent_name} ({len(cats)} main cats)")
             full_tree[parent_name] = []
             sorted_cats = sorted(cats, key=lambda x: str(x.get("name", "")).lower())
 
-            with ThreadPoolExecutor(max_workers=20) as executor:
+            # Ограничиваем до 3 потоков суммарно на группу, чтобы не ловить 429
+            with ThreadPoolExecutor(max_workers=3) as executor:
                 futures = [
                     executor.submit(_fetch_full_category_tree, parser, str(cat["code"]), 1, max_level)
                     for cat in sorted_cats
                     if cat.get("code")
                 ]
                 for future in as_completed(futures):
-                    node = future.result()
-                    if node:
-                        full_tree[parent_name].append(node)
+                    try:
+                        node = future.result()
+                        if node:
+                            print(f"  [+] Scanned: {node.get('title')}")
+                            full_tree[parent_name].append(node)
+                    except Exception as e:
+                        print(f"  [!] Error fetching root category: {e}")
 
             full_tree[parent_name].sort(key=lambda x: str(x.get("title", "")).lower())
 
         output_file = project_root / "categories_full_tree.json"
+        print(f"[REBUILD] Saving full tree to {output_file}...")
         with open(output_file, "w", encoding="utf-8") as f:
             json.dump(full_tree, f, ensure_ascii=False, indent=2)
 
+        print("[REBUILD] Updating database...")
         _replace_categories_in_db(full_tree)
+        print("[REBUILD] Done!")
 
         return full_tree

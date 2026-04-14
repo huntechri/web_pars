@@ -50,6 +50,8 @@ class ParseResultRowResponse(BaseModel):
     level2: str | None = None
     level3: str | None = None
     level4: str | None = None
+    level5: str | None = None
+    level6: str | None = None
     image: str | None = None
     url: str | None = None
     supplier: str | None = None

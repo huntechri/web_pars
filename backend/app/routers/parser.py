@@ -11,7 +11,7 @@ from ..database import get_db
 from ..deps import get_current_user
 from ..models import ParseJob, ParseResult, User
 from ..schemas import ParseJobProgressResponse, ParseJobResponse, ParseJobResultsResponse, ParseResultRowResponse, StartParseRequest
-from ..services.parser_jobs import get_job_progress, start_job
+from ..services.parser_jobs import get_job_progress, request_cancel, start_job
 from ..services.storage import get_download_url, is_object_storage_enabled
 
 
@@ -89,6 +89,21 @@ def get_job(job_id: str, db: Session = Depends(get_db), current_user: User = Dep
     )
 
 
+@router.post("/jobs/{job_id}/cancel")
+def cancel_job(job_id: str, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    job = db.query(ParseJob).filter(ParseJob.id == job_id, ParseJob.user_id == current_user.id).first()
+    if not job:
+        raise HTTPException(status_code=404, detail="Задача не найдена")
+    if job.status not in ("queued", "running"):
+        raise HTTPException(status_code=400, detail=f"Нельзя отменить задачу со статусом '{job.status}'")
+
+    request_cancel(job_id)
+    job.status = "cancelled"
+    job.error = "Остановлено пользователем"
+    db.commit()
+    return {"ok": True}
+
+
 @router.get("/jobs/{job_id}/results", response_model=ParseJobResultsResponse)
 def get_job_results(
     job_id: str,
@@ -130,6 +145,8 @@ def get_job_results(
                 level2=row.level2,
                 level3=row.level3,
                 level4=row.level4,
+                level5=row.level5,
+                level6=row.level6,
                 image=row.image,
                 url=row.url,
                 supplier=row.supplier,

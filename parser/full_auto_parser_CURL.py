@@ -197,18 +197,23 @@ class CurlParser:
         # 1. Пробуем через requests (уже с сессией и куками)
         for attempt in range(retry):
             try:
-                resp = self.session.get(url, timeout=15)
+                resp = self.session.get(url, timeout=30)
                 if resp.status_code == 200:
+                    # Маленькая пауза после успешного запроса для имитации человека
+                    time.sleep(0.3)
                     return resp.json()
                 # Логируем статус, чтобы понять причину сбоя
                 self.log(f"      [HTTP] status={resp.status_code} attempt={attempt+1}/{retry} url={url[:80]}")
                 if resp.status_code == 429:
-                    # Уважаем Retry-After от сервера (или ждём 10 с по умолчанию)
-                    retry_after = int(resp.headers.get('Retry-After', 10))
-                    retry_after = min(retry_after, 60)  # не ждём больше минуты
+                    # Уважаем Retry-After от сервера (или ждём 15 с по умолчанию)
+                    retry_after = int(resp.headers.get('Retry-After', 15))
+                    retry_after = min(retry_after, 120)  # не ждём больше 2 минут
                     self.log(f"      [RATE LIMIT] Waiting {retry_after}s before retry...")
                     time.sleep(retry_after)
                     continue
+                if resp.status_code == 416:
+                    self.log(f"      [EOF] Offset out of range (status=416). Stopping.")
+                    return {"data": {"products": [], "total": 0}}
                 if resp.status_code in (403, 401):
                     self.log(f"      [AUTH] Cookies/session may be expired (status={resp.status_code})")
             except Exception as exc:
@@ -239,7 +244,14 @@ class CurlParser:
         try:
             result = subprocess.run(cmd, capture_output=True, text=True, encoding='utf-8', errors='ignore', creationflags=creationflags)
             if result.returncode == 0 and result.stdout.strip():
-                return json.loads(result.stdout)
+                try:
+                    data = json.loads(result.stdout)
+                    # Если curl тоже вернул какую-то ошибку в JSON
+                    if isinstance(data, dict) and data.get('status') == 416:
+                        return {"data": {"products": [], "total": 0}}
+                    return data
+                except:
+                    pass
             if result.returncode != 0:
                 self.log(f"      [CURL ERR] returncode={result.returncode} stderr={result.stderr.strip()[:120]}")
             elif result.stdout.strip():
@@ -294,8 +306,9 @@ class CurlParser:
 
         off = limit
         page_idx = 2
-        max_pages_guard = 1000
+        max_pages_guard = 200
         failed_offsets = []
+        consecutive_failures = 0
 
         while page_idx <= max_pages_guard:
             if self.stop_requested:
@@ -314,11 +327,18 @@ class CurlParser:
             if not p_data or p_data.get('data') is None:
                 self.log(f"    [WARN] Page fetch failed: offset={off} (все 5 попыток исчерпаны)")
                 failed_offsets.append(off)
+                consecutive_failures += 1
+                if consecutive_failures >= 5:
+                    self.log(f"    [ERROR] Too many consecutive failures for category {section_code}. Skipping remaining pages.")
+                    break
+                
                 # В первом проходе не обрываем весь парсинг из-за одной проблемной страницы.
                 off += limit
                 page_idx += 1
                 continue
 
+            # Если страница загрузилась успешно - сбрасываем счетчик ошибок
+            consecutive_failures = 0
             raw_list = p_data.get('data', {}).get('products', []) or []
             if not raw_list:
                 self.log(f"    [INFO] Reached last page at offset={off}")
@@ -372,7 +392,8 @@ class CurlParser:
                 preview = ", ".join(str(x) for x in unrecovered_offsets[:10])
                 if len(unrecovered_offsets) > 10:
                     preview += ", ..."
-                raise RuntimeError(f"Failed to fetch category pages (offsets): {preview}")
+                self.log(f"    [WARN] Failed to recover some pages (offsets): {preview}")
+                # Мы больше не выбрасываем RuntimeError, чтобы не обрушивать весь процесс
 
         return all_products[:max_products] if max_products else all_products
 
@@ -413,8 +434,9 @@ class CurlParser:
                     'image': img_url,
                     'url': f"https://moscow.petrovich.ru/product/{p.get('code', '')}/"
                 }
-                for i, name in enumerate(category_path[:4], 1): item[f'level{i}'] = name
-                for i in range(len(category_path) + 1, 5): item[f'level{i}'] = ''
+                clean_path = [c for c in category_path if c != "Главная"]
+                for i, name in enumerate(clean_path[:6], 1): item[f'level{i}'] = name
+                for i in range(len(clean_path) + 1, 7): item[f'level{i}'] = ''
                 processed.append(item)
             except: continue
         return processed
@@ -448,6 +470,8 @@ class CurlParser:
             'level2': 'Категория LV2',
             'level3': 'Категория LV3',
             'level4': 'Категория LV4',
+            'level5': 'Категория LV5',
+            'level6': 'Категория LV6',
             'image': 'URL изображения',
             'url': 'Ссылка на товар', # Оставляем возможность вывести ссылку, если пользователь захочет
             'supplier': 'Источник'    # Петрович

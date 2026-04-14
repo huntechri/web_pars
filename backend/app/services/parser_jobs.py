@@ -17,6 +17,9 @@ from .storage import is_object_storage_enabled, upload_csv
 _lock = threading.Lock()
 _progress_lock = threading.Lock()
 _job_progress: dict[str, dict[str, Any]] = {}
+_cancel_requested: set[str] = set()
+_active_parsers: dict[str, Any] = {}
+_parsers_lock = threading.Lock()
 
 
 def _save_job_results(db: Session, job_id: str, parsed_items: list[dict[str, Any]]) -> None:
@@ -55,16 +58,27 @@ def _set_job_progress(job_id: str, payload: dict[str, Any]) -> None:
         _job_progress[job_id] = prev
 
 
+def request_cancel(job_id: str) -> None:
+    """Запросить остановку активного парсера для указанного job."""
+    _cancel_requested.add(job_id)
+    with _parsers_lock:
+        parser = _active_parsers.get(job_id)
+        if parser is not None:
+            parser.stop_requested = True
+
+
 def get_job_progress(job_id: str) -> dict[str, Any]:
     with _progress_lock:
         return dict(_job_progress.get(job_id, {}))
 
 
 def recover_stale_running_jobs() -> int:
-    """Переводит зависшие после рестарта сервера job из running в failed."""
+    """Переводит зависшие после рестарта сервера job из running/queued в failed."""
     db: Session = SessionLocal()
     try:
-        stale_jobs = db.query(ParseJob).filter(ParseJob.status == "running").all()
+        stale_jobs = db.query(ParseJob).filter(
+            ParseJob.status.in_(["running", "queued"])
+        ).all()
         if not stale_jobs:
             return 0
 
@@ -100,6 +114,13 @@ def _run_parser_job(job_id: str, project_root: Path) -> None:
         )
 
         def on_progress(progress_payload: dict[str, Any] | float) -> None:
+            # Если поступил запрос на остановку — сигналим парсеру
+            if job_id in _cancel_requested:
+                with _parsers_lock:
+                    p = _active_parsers.get(job_id)
+                    if p is not None:
+                        p.stop_requested = True
+
             if isinstance(progress_payload, dict):
                 percent = progress_payload.get("progress_percent")
                 if isinstance(percent, (float, int)):
@@ -119,11 +140,23 @@ def _run_parser_job(job_id: str, project_root: Path) -> None:
             progress_callback=on_progress,
         )
 
+        with _parsers_lock:
+            _active_parsers[job_id] = parser
+
+        # Если уже был запрос на отмену до создания парсера — применяем сразу
+        if job_id in _cancel_requested:
+            parser.stop_requested = True
+
         # Важно: ядро парсера использует файлы из CWD (Cook/categories_config.txt)
         # Поэтому выполняем запуск из корня проекта.
         prev_cwd = os.getcwd()
         try:
             os.chdir(project_root)
+
+            # Если отмена запрошена ещё до запуска парсинга
+            if job_id in _cancel_requested:
+                raise InterruptedError("Job cancelled by user")
+
             output_file, parsed_items = parser.run(
                 selected_categories=job.selected_categories,
                 max_products_per_cat=job.max_products,
@@ -149,12 +182,19 @@ def _run_parser_job(job_id: str, project_root: Path) -> None:
             job.status = "done"
             job.error = None
             _set_job_progress(job_id, {"status": "done", "progress_percent": 100})
+        except InterruptedError:
+            job.status = "cancelled"
+            job.error = "Остановлено пользователем"
+            _set_job_progress(job_id, {"status": "cancelled"})
         except Exception as exc:
             job.status = "failed"
             job.error = str(exc)
             _set_job_progress(job_id, {"status": "failed"})
         finally:
             os.chdir(prev_cwd)
+            with _parsers_lock:
+                _active_parsers.pop(job_id, None)
+            _cancel_requested.discard(job_id)
 
         db.commit()
     finally:

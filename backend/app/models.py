@@ -66,6 +66,8 @@ class ParseResult(Base):
     level2: Mapped[str | None] = mapped_column(String(255), nullable=True)
     level3: Mapped[str | None] = mapped_column(String(255), nullable=True)
     level4: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    level5: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    level6: Mapped[str | None] = mapped_column(String(255), nullable=True)
     image: Mapped[str | None] = mapped_column(Text, nullable=True)
     url: Mapped[str | None] = mapped_column(Text, nullable=True)
     supplier: Mapped[str | None] = mapped_column(String(128), nullable=True)

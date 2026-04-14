@@ -247,6 +247,15 @@ button:disabled {
   background: #e5e7eb;
 }
 
+.btn-danger {
+  background: #dc2626;
+  color: #fff;
+}
+
+.btn-danger:hover:not(:disabled) {
+  background: #b91c1c;
+}
+
 .section-gap {
   margin-bottom: 14px;
 }

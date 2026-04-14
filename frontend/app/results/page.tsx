@@ -26,6 +26,8 @@ type ResultRow = {
   level2?: string | null;
   level3?: string | null;
   level4?: string | null;
+  level5?: string | null;
+  level6?: string | null;
   image?: string | null;
   url?: string | null;
   supplier?: string | null;
@@ -109,6 +111,30 @@ export default function ResultsPage() {
   const page = useMemo(() => Math.floor(offset / PAGE_SIZE) + 1, [offset]);
   const pagesTotal = useMemo(() => Math.max(1, Math.ceil(total / PAGE_SIZE)), [total]);
 
+  const handleDownload = async () => {
+    if (!token || !selectedJobId) return;
+    try {
+      const resp = await apiFetch(`/api/parser/jobs/${selectedJobId}/download`, {}, token);
+      if (resp instanceof Response) {
+        const blob = await resp.blob();
+        const url = window.URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = `job_${selectedJobId}.csv`;
+        document.body.appendChild(a);
+        a.click();
+        window.URL.revokeObjectURL(url);
+        document.body.removeChild(a);
+      } else {
+        // Fallback or error if it's already parsed as JSON (though download endpoint should be binary)
+        console.error("Download failed: response is not a valid stream", resp);
+      }
+    } catch (err: any) {
+      console.error(err);
+      alert("Не удалось скачать файл: " + err.message);
+    }
+  };
+
   return (
     <main className="app-shell">
       <ParserSidebar />
@@ -117,7 +143,16 @@ export default function ResultsPage() {
       <div className="card results-card">
         <div className="row space-between">
           <h1 className="m-0">Результаты парсинга</h1>
-          <button onClick={() => router.push("/dashboard")}>Назад</button>
+          <div className="row">
+            <button
+              className="btn-secondary"
+              onClick={handleDownload}
+              disabled={!selectedJobId || loadingRows}
+            >
+              Скачать CSV
+            </button>
+            <button onClick={() => router.push("/dashboard")}>Назад</button>
+          </div>
         </div>
 
         <div className="mt-16 row">
@@ -157,6 +192,8 @@ export default function ResultsPage() {
                 <th>LV2</th>
                 <th>LV3</th>
                 <th>LV4</th>
+                <th>LV5</th>
+                <th>LV6</th>
                 <th>Источник</th>
                 <th>Ссылка</th>
               </tr>
@@ -164,11 +201,11 @@ export default function ResultsPage() {
             <tbody>
               {loadingRows ? (
                 <tr>
-                  <td colSpan={12}>Загрузка...</td>
+                  <td colSpan={14}>Загрузка...</td>
                 </tr>
               ) : rows.length === 0 ? (
                 <tr>
-                  <td colSpan={12}>Нет данных</td>
+                  <td colSpan={14}>Нет данных</td>
                 </tr>
               ) : (
                 rows.map((row) => (
@@ -183,6 +220,8 @@ export default function ResultsPage() {
                     <td>{row.level2 || ""}</td>
                     <td>{row.level3 || ""}</td>
                     <td>{row.level4 || ""}</td>
+                    <td>{row.level5 || ""}</td>
+                    <td>{row.level6 || ""}</td>
                     <td>{row.supplier || ""}</td>
                     <td>
                       {row.url ? (

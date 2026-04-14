@@ -54,7 +54,7 @@ def get_categories_tree(_: User = Depends(get_current_user), db: Session = Depen
 
 @router.post("/refresh")
 def refresh_categories(_: User = Depends(get_current_user)):
-    tree = rebuild_categories_tree(PROJECT_ROOT, max_level=3)
+    tree = rebuild_categories_tree(PROJECT_ROOT, max_level=6)
     return {
         "status": "ok",
         "groups": len(tree),
