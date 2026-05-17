@@ -3,7 +3,7 @@
 """
 Простой CLI-парсер материалов из каталога Петрович.
 
-Скрипт самодостаточный: использует только стандартную библиотеку и requests.
+Скрипт самодостаточный: использует стандартную библиотеку и curl_cffi.
 Куки/заголовки берутся из .env проекта:
   APP_PARSER_COOKIES={...}
   APP_PARSER_HEADERS={...}
@@ -12,6 +12,7 @@
 import argparse
 import ast
 import csv
+import html
 import json
 import os
 import re
@@ -25,7 +26,12 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 from urllib.parse import urlencode
 
-import requests
+try:
+    from curl_cffi.requests import Session
+    from curl_cffi.requests.exceptions import RequestException
+except ImportError:
+    print("Установите curl_cffi: pip install curl_cffi", file=sys.stderr)
+    sys.exit(1)
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -33,13 +39,16 @@ CATEGORIES_TREE_FILE = PROJECT_ROOT / "categories_full_tree.json"
 ENV_FILE = PROJECT_ROOT / ".env"
 
 API_BASE_URL = "https://api.petrovich.ru/catalog/v5/sections"
+API_PRODUCTS_URL = "https://api.petrovich.ru/catalog/v5/products"
 DEFAULT_SUPPLIER = "Петрович"
 DEFAULT_CITY_CODE = "msk"
 DEFAULT_CLIENT_ID = "pet_site"
 PAGE_LIMIT = 50
 MAX_CATEGORY_WORKERS = 8
 MAX_PAGE_WORKERS = 10
-SLEEP_BETWEEN_REQUESTS = 0.1
+SLEEP_BETWEEN_REQUESTS = 0.15
+DEFAULT_REQUEST_TIMEOUT = 30
+DETAIL_REQUEST_TIMEOUT = 10
 
 CSV_COLUMNS = [
     "Код",
@@ -84,8 +93,8 @@ class PetrovichMaterialParser:
             project_root / CATEGORIES_TREE_FILE.name
         )
 
-        # requests.Session небезопасно шарить между потоками, поэтому у каждого
-        # потока своя сессия с одинаковыми куками/заголовками.
+        # Session небезопасно шарить между потоками, поэтому у каждого
+        # потока своя curl_cffi-сессия с одинаковыми куками/заголовками.
         self._thread_local = threading.local()
         self._request_lock = threading.Lock()
         self._last_request_at = 0.0
@@ -225,10 +234,10 @@ class PetrovichMaterialParser:
 
     # ---------- HTTP ----------
 
-    def _session(self) -> requests.Session:
+    def _session(self) -> Session:
         session = getattr(self._thread_local, "session", None)
         if session is None:
-            session = requests.Session()
+            session = Session(impersonate="chrome131")
             session.headers.update(self.headers)
             for key, value in self.cookies.items():
                 session.cookies.set(key, value)
@@ -259,12 +268,12 @@ class PetrovichMaterialParser:
             except (TypeError, ValueError, OverflowError):
                 return 15
 
-    def fetch_json(self, url: str, retry: int = 3) -> Optional[Dict[str, Any]]:
+    def fetch_json(self, url: str, retry: int = 3, timeout: int = DEFAULT_REQUEST_TIMEOUT) -> Optional[Dict[str, Any]]:
         last_error = ""
         for attempt in range(1, retry + 1):
             try:
                 self._respect_rate_limit()
-                response = self._session().get(url, timeout=30)
+                response = self._session().get(url, timeout=timeout)
 
                 if response.status_code == 200:
                     return response.json()
@@ -288,7 +297,7 @@ class PetrovichMaterialParser:
                     return None
                 self.log(f"[HTTP] {last_error} (попытка {attempt}/{retry})")
 
-            except requests.RequestException as exc:
+            except RequestException as exc:
                 last_error = str(exc)
                 self.log(f"[ERR] Ошибка запроса (попытка {attempt}/{retry}): {exc}")
             except ValueError as exc:
@@ -310,6 +319,13 @@ class PetrovichMaterialParser:
             "client_id": DEFAULT_CLIENT_ID,
         }
         return f"{API_BASE_URL}/{section_code}/products?{urlencode(params)}"
+
+    def build_product_detail_url(self, product_code: str) -> str:
+        params = {
+            "city_code": DEFAULT_CITY_CODE,
+            "client_id": DEFAULT_CLIENT_ID,
+        }
+        return f"{API_PRODUCTS_URL}/{product_code}?{urlencode(params)}"
 
     # ---------- Извлечение товара ----------
 
@@ -345,6 +361,66 @@ class PetrovichMaterialParser:
             return f"{float(value):.2f}"
         except (TypeError, ValueError):
             return str(value)
+
+    def _strip_html(self, value: str) -> str:
+        text = re.sub(r"<\s*br\s*/?\s*>", "\n", value or "", flags=re.I)
+        text = re.sub(r"</\s*(?:p|div|li|h[1-6])\s*>", "\n", text, flags=re.I)
+        text = re.sub(r"<[^>]+>", " ", text)
+        text = re.sub(r"[ \t\r\f\v]+", " ", text)
+        text = re.sub(r"\n\s*\n+", "\n", text)
+        return html.unescape(text).strip()
+
+    def _description_text_value(self, value: Any) -> str:
+        if isinstance(value, dict):
+            for key in ("description", "text", "title", "value"):
+                if value.get(key):
+                    return self._description_text_value(value.get(key))
+            return ""
+        if isinstance(value, list):
+            return "\n".join(
+                part for part in (self._description_text_value(item) for item in value) if part
+            )
+        return self._as_csv_text(value)
+
+    def _extract_detail_description(self, product: Dict[str, Any], generated_description: str) -> str:
+        description = self._description_text_value(product.get("description_no_html"))
+        if not description:
+            html_description = self._description_text_value(product.get("description"))
+            description = self._strip_html(html_description) if html_description else ""
+        if not description:
+            description = generated_description
+
+        extended = self._description_text_value(product.get("extended_description_no_html"))
+        if extended:
+            description = f"{description}\n{extended}" if description else extended
+        return description
+
+    def _extract_supplier(self, product: Dict[str, Any]) -> str:
+        supplier = product.get("supplier") or {}
+        if isinstance(supplier, dict):
+            title = str(supplier.get("title") or "").strip()
+            if title:
+                return title
+        return DEFAULT_SUPPLIER
+
+    def fetch_product_detail(self, product_code: str) -> Dict[str, Any]:
+        """Fetch optional product detail data.
+
+        The detail endpoint is frequently blocked by Qrator (403). Treat any
+        non-200/timeout/invalid payload as a soft miss: the list item already
+        has enough data to save a CSV row.
+        """
+        if not product_code:
+            return {}
+        detail_data = self.fetch_json(
+            self.build_product_detail_url(product_code),
+            retry=1,
+            timeout=DETAIL_REQUEST_TIMEOUT,
+        )
+        if not detail_data:
+            return {}
+        product = (detail_data.get("data") or {}).get("product") or {}
+        return product if isinstance(product, dict) else {}
 
     def _extract_weight(self, product: Dict[str, Any], properties: List[Dict[str, Any]]) -> str:
         weight = product.get("weight")
@@ -525,8 +601,19 @@ class PetrovichMaterialParser:
             properties = []
 
         code = str(product.get("code") or product.get("vendor_code") or product.get("article") or "").strip()
+        detail_product = self.fetch_product_detail(code)
+        has_detail = bool(detail_product)
+        if has_detail:
+            merged_product = dict(product)
+            merged_product.update(detail_product)
+            product = merged_product
+            properties = product.get("properties") or properties
+            if not isinstance(properties, list):
+                properties = []
+
         title = str(product.get("title") or "").strip()
         levels = self._extract_levels(product, fallback_category)
+        generated_description = self._make_description(title, properties)
 
         subcategory = " > ".join(
             levels.get(f"level{i}", "") for i in range(2, 7) if levels.get(f"level{i}", "")
@@ -540,10 +627,10 @@ class PetrovichMaterialParser:
             "Валюта": "₽",
             "Категория": levels.get("level1", ""),
             "Подкатегория": subcategory,
-            "Поставщик": DEFAULT_SUPPLIER,
+            "Поставщик": self._extract_supplier(product) if has_detail else DEFAULT_SUPPLIER,
             "Синонимы": self._as_csv_text(product.get("aliases")) or self._make_aliases(title),
             "Ключевые слова": self._as_csv_text(product.get("keywords")) or self._make_keywords(title, properties, levels),
-            "Описание": self._as_csv_text(product.get("description")) or self._make_description(title, properties),
+            "Описание": self._extract_detail_description(product, generated_description),
             "Ссылка на изображение": self._extract_image(product),
         }
 
@@ -582,7 +669,8 @@ class PetrovichMaterialParser:
         if not isinstance(raw_first, list):
             raw_first = []
 
-        collected = [self.process_product(product, category) for product in raw_first]
+        first_batch = raw_first[:max_products_per_cat] if max_products_per_cat else raw_first
+        collected = [self.process_product(product, category) for product in first_batch]
         self.log(f"    найдено на первой странице: {len(raw_first)}, total={total}")
 
         if max_products_per_cat and len(collected) >= max_products_per_cat:
@@ -608,8 +696,13 @@ class PetrovichMaterialParser:
                 if not raw_products:
                     self.log(f"    offset={offset}: пусто/конец")
                     break
+                if max_products_per_cat:
+                    remaining = max_products_per_cat - len(collected)
+                    raw_products = raw_products[:remaining]
                 collected.extend(self.process_product(product, category) for product in raw_products)
                 self.log(f"    offset={offset}: +{len(raw_products)} (всего {len(collected)})")
+                if max_products_per_cat and len(collected) >= max_products_per_cat:
+                    break
                 if len(raw_products) < PAGE_LIMIT:
                     break
                 offset += PAGE_LIMIT
@@ -628,8 +721,13 @@ class PetrovichMaterialParser:
                 if not raw_products:
                     self.log(f"    offset={offset}: пусто/ошибка")
                     continue
+                if max_products_per_cat:
+                    remaining = max_products_per_cat - len(collected)
+                    raw_products = raw_products[:remaining]
                 collected.extend(self.process_product(product, category) for product in raw_products)
                 self.log(f"    offset={offset}: +{len(raw_products)} (всего {len(collected)})")
+                if max_products_per_cat and len(collected) >= max_products_per_cat:
+                    break
 
         result = collected[:max_products_per_cat] if max_products_per_cat else collected
         self._log_category_progress(prefix, category, len(result))
